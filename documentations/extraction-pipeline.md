@@ -152,10 +152,10 @@ Tujuan: **tidak mengirim raw JSON ABBYY (~80k baris) ke LLM**.
 
 | Fungsi | Peran |
 |--------|------|
-| `filterOcrJson()` | Ambil hanya `layout.pages[].texts[].lines[].text` + `tables[].cells[].lines[].text` |
-| `extractFields()` | Regex: policyNumber, claimNumber, patientName, dob, admission/discharge, totalAmount |
+| `filterOcrJson()` | Parse ABBYY layout → per-page `lines`, `rows`, `pairs`, `tables` (`ocr-layout.ts`) |
+| `extractFields()` | Regex pada baris + row + pair (policy, claim, patient, dates, total) |
 | `validateOutput()` | `value` harus substring dari `source_text`, else `not_found` |
-| `prepareForLLM()` | Gabung hint + teks per halaman, cap `LLM_OCR_MAX_CHARS` |
+| `prepareForLLM()` | Teks per halaman dari rows/tables, cap `LLM_OCR_MAX_CHARS` |
 
 Output ke worker:
 
@@ -258,7 +258,8 @@ Hasil: `validation.hasBillingMismatch` + pesan per claim index.
 | `validation` | Billing |
 | `llmStatus`, `llmError`, `llmAttempts`, `llmEnhanced` | LLM |
 | `confidence` | LLM aggregate atau estimasi lokal |
-| `schemaVersion` | `2` |
+| `schemaVersion` | `3` |
+| `ocrPageLines` | Per page: `lines[]`, `rows[]`, `pairs[]`, `tables[]`, `linesFlat[]`, `regions[]` (tanpa words/chars mentah) |
 
 ### Status claim (`resolveClaimStatus`)
 
@@ -289,7 +290,7 @@ Response mencakup `claim`, `documents`, `latestJob`, `latestResult`.
 
 Frontend: `/claims/[id]` — timeline, tab Overview/Fields/Line items/JSON/Debug, preview dokumen.
 
-Polling: saat `latestJob.status` ∈ `QUEUED`, `PROCESSING` — UI refresh ~3s.
+Status job: refresh manual lewat tombol **Refresh** di halaman claim detail (tanpa polling otomatis).
 
 ---
 
@@ -400,6 +401,19 @@ sequenceDiagram
 - **pdf-parse / tesseract** dihapus — OCR hanya ABBYY Vantage.
 - Raw `OcrJson` tidak dikirim ke LLM; gunakan `ocr-preprocess` + cap karakter.
 - `preExtractedFields` adalah hint regex, bukan pengganti output LLM schema penuh.
+
+### Verifikasi OCR pasca-LLM (`extraction-verify.ts`)
+
+Setelah JSON LLM dinormalisasi, setiap field **divalidasi terhadap korpus OCR** (`filteredPlainText` + `ocrPageLines`):
+
+- `value` harus dapat dibuktikan di `source_text` atau teks OCR (termasuk match digit untuk nominal).
+- Nilai uang tanpa digit / hanya tanda baca → `not_found`.
+- Field LLM yang gagal verifikasi diganti dari **pre-extracted** atau **layout pairs** jika terbukti di OCR.
+- Line item / lab tanpa jejak di OCR dihapus.
+
+Payload menyimpan `extractionVerification`: `{ fieldsChecked, fieldsRejected, fieldsRepairedFromOcr, rejectedPaths, ... }`.
+
+**Catatan:** Akurasi 100% mutlak dari model saja tidak realistis; sistem ini menolak tebakan yang tidak ada di OCR daripada menampilkan nilai salah.
 
 ---
 

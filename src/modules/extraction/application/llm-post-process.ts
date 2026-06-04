@@ -12,6 +12,15 @@ import {
   LlmParseResult,
 } from "@/modules/extraction/application/llm-json-parse";
 import {
+  verifyAndRepairExtraction,
+  type ExtractionVerificationStats,
+  isValidMonetaryValue,
+} from "@/modules/extraction/application/extraction-verify";
+import {
+  OcrPageLinesPayload,
+  PreExtractedFields,
+} from "@/modules/extraction/application/ocr-preprocess";
+import {
   ExtractionClaim,
   ExtractionLineItem,
   ExtractionTestResult,
@@ -29,6 +38,7 @@ export type LlmPostProcessOutcome = {
   result: LlmExtractionResult | null;
   error: string | null;
   attempts: number;
+  verification?: ExtractionVerificationStats;
 };
 
 let cachedSystemPrompt: string | null = null;
@@ -89,7 +99,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizeTracedField(input: unknown): TracedField {
+function normalizeTracedField(input: unknown, monetary = false): TracedField {
   if (!isObject(input)) {
     return { value: "not_found", source_text: "", page: null, confidence: 0 };
   }
@@ -97,10 +107,14 @@ function normalizeTracedField(input: unknown): TracedField {
   const confidence = Number.isFinite(confidenceRaw)
     ? Math.max(0, Math.min(1, confidenceRaw))
     : 0;
-  const value =
+  let value: string | number =
     input.value == null || input.value === ""
       ? "not_found"
       : (input.value as string | number);
+
+  if (monetary && value !== "not_found" && !isValidMonetaryValue(value)) {
+    value = "not_found";
+  }
 
   return {
     value,
@@ -109,17 +123,19 @@ function normalizeTracedField(input: unknown): TracedField {
         ? input.source_text.slice(0, MAX_SOURCE_TEXT_CHARS)
         : "",
     page: typeof input.page === "number" ? input.page : null,
-    confidence,
+    confidence: value === "not_found" ? 0 : confidence,
   };
 }
 
 function normalizeLineItem(input: unknown): ExtractionLineItem | null {
   if (!isObject(input)) return null;
   const confidenceRaw = Number(input.confidence);
+  let amount = String(input.amount ?? "");
+  if (amount && !isValidMonetaryValue(amount)) amount = "";
   return {
     description: String(input.description ?? ""),
     quantity: String(input.quantity ?? ""),
-    amount: String(input.amount ?? ""),
+    amount,
     related_doctor: String(input.related_doctor ?? ""),
     source_text:
       typeof input.source_text === "string"
@@ -170,9 +186,9 @@ function normalizeClaim(input: unknown): ExtractionClaim | null {
     },
     billing: {
       currency: normalizeTracedField(billing.currency),
-      tax_amount: normalizeTracedField(billing.tax_amount),
-      total_amount_read: normalizeTracedField(billing.total_amount_read),
-      total_amount_calculated: normalizeTracedField(billing.total_amount_calculated),
+      tax_amount: normalizeTracedField(billing.tax_amount, true),
+      total_amount_read: normalizeTracedField(billing.total_amount_read, true),
+      total_amount_calculated: normalizeTracedField(billing.total_amount_calculated, true),
       payment_status: normalizeTracedField(billing.payment_status),
     },
     patient: {
@@ -332,7 +348,7 @@ async function callLlmOnce(params: {
         },
         body: JSON.stringify({
           model: env.OPENAI_MODEL,
-          temperature: 0.1,
+          temperature: 0,
           max_tokens: env.LLM_MAX_OUTPUT_TOKENS,
           response_format: { type: "json_object" },
           messages: [
@@ -452,8 +468,15 @@ export function isLlmPostProcessEnabled(): boolean {
   return isLlmEnabled();
 }
 
+export type LlmPostProcessOptions = {
+  preExtracted?: PreExtractedFields;
+  filteredPlainText?: string;
+  ocrPageLines?: OcrPageLinesPayload[];
+};
+
 export async function postProcessExtractionWithLlm(
   rawText: string,
+  options?: LlmPostProcessOptions,
 ): Promise<LlmPostProcessOutcome> {
   if (!isLlmEnabled()) {
     return { status: "skipped", result: null, error: null, attempts: 0 };
@@ -487,7 +510,18 @@ export async function postProcessExtractionWithLlm(
       insistExtract,
     });
     if (outcome.ok && outcome.result) {
-      return { status: "ok", result: outcome.result, error: null, attempts: attempt };
+      const verified = verifyAndRepairExtraction(outcome.result, {
+        filteredPlainText: options?.filteredPlainText ?? rawText,
+        ocrPageLines: options?.ocrPageLines,
+        preExtracted: options?.preExtracted,
+      });
+      return {
+        status: "ok",
+        result: verified.result,
+        verification: verified.stats,
+        error: null,
+        attempts: attempt,
+      };
     }
 
     lastError = outcome.error;

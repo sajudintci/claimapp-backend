@@ -132,7 +132,11 @@ export const initExtractionQueue = async () => {
       const llmExpected = isLlmPostProcessEnabled();
 
       let llmOutcome = ocrSufficient
-        ? await postProcessExtractionWithLlm(extracted.text)
+        ? await postProcessExtractionWithLlm(extracted.text, {
+            preExtracted: extracted.preExtracted,
+            filteredPlainText: extracted.filteredPlainText ?? extracted.text,
+            ocrPageLines: extracted.ocrPageLines,
+          })
         : {
             status: "failed" as const,
             result: null,
@@ -156,7 +160,12 @@ export const initExtractionQueue = async () => {
         claims.length > 0
           ? validateClaimsBilling(claims, env.BILLING_MISMATCH_TOLERANCE_PERCENT)
           : { hasBillingMismatch: false, claims: [] };
-      const confidence = llmResult?.confidence ?? localConfidence;
+      let confidence = llmResult?.confidence ?? localConfidence;
+      const verification = llmOutcome.verification;
+      if (verification && verification.fieldsRejected > 0) {
+        const penalty = Math.min(0.35, verification.fieldsRejected * 0.04);
+        confidence = Math.max(0, confidence - penalty);
+      }
       const extractedPayload = {
         claimId: job.data.claimId,
         source: extracted.source,
@@ -185,7 +194,8 @@ export const initExtractionQueue = async () => {
         llmStatus: llmOutcome.status,
         llmError: llmOutcome.error,
         llmAttempts: llmOutcome.attempts,
-        schemaVersion: 2,
+        extractionVerification: llmOutcome.verification ?? null,
+        schemaVersion: 3,
       };
 
       const nextStatus = resolveClaimStatus({

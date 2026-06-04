@@ -42,13 +42,31 @@ npm run start
 
 `build` mengompilasi TypeScript ke `dist/` dan menyalin prompt LLM ke `dist/modules/extraction/prompts/`.
 
+## Docker
+
+```bash
+cd backend
+docker build -t claimora-backend .
+docker run -p 4000:4000 \
+  -e DATABASE_URL=postgres://user:pass@host:5432/claimora \
+  -e JWT_SECRET=... -e JWT_REFRESH_SECRET=... \
+  -e REDIS_HOST=redis -e REDIS_PORT=6379 \
+  -e ABBYY_CLIENT_ID=... -e ABBYY_CLIENT_SECRET=... -e ABBYY_SKILL_ID=... \
+  -v claimora-storage:/app/storage \
+  claimora-backend
+```
+
+**Coolify (repo backend saja):** Base Directory = `/`, Dockerfile = `Dockerfile`. Set semua env dari `.env.example`. Volume disarankan untuk `/app/storage`.
+
+Satu container menjalankan API + worker ekstraksi (BullMQ). PostgreSQL dan Redis harus reachable dari container.
+
 ## Scripts
 
 | Perintah | Deskripsi |
 |----------|-----------|
 | `npm run dev` | API + extraction worker (hot reload) |
 | `npm run build` | Compile + salin prompt |
-| `npm run start` | Jalankan `dist/server.js` |
+| `npm run start` | Jalankan `dist/server.js` (dengan path alias `@/`) |
 | `npm run lint` | ESLint pada `src/` |
 | `npm run seed:super-admin` | Buat org/role/user super admin |
 | `npm run abbyy:list-skills` | Daftar skill ID di tenant ABBYY |

@@ -1,4 +1,5 @@
 import {
+  OcrPageLinesPayload,
   preprocessAbbyyOcrJson,
   PreExtractedFields,
 } from "@/modules/extraction/application/ocr-preprocess";
@@ -10,7 +11,7 @@ export type AbbyyOcrTextResult = {
   ocrFiltered: boolean;
   filteredPlainText?: string;
   filteredCharCount?: number;
-  ocrPageLines?: Array<{ page: number; lines: string[] }>;
+  ocrPageLines?: OcrPageLinesPayload[];
   preExtracted?: PreExtractedFields;
 };
 
