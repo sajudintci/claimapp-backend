@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output (compile with `npm run build`; do not commit dist/)
+dist/
+
+# Environment (never commit secrets)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Runtime storage (uploads, logs, avatars)
+storage/uploads/**
+storage/processed/**
+storage/avatars/**
+storage/logs/**
+!storage/.gitkeep
+!storage/uploads/.gitkeep
+!storage/processed/.gitkeep
+!storage/avatars/.gitkeep
+!storage/logs/.gitkeep
+
+# Logs & debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# OS & editors
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# TypeScript
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Optional local overrides
+*.local
