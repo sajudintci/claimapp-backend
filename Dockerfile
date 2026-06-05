@@ -6,9 +6,9 @@
 
 FROM node:20-bookworm-slim AS base
 WORKDIR /app
-ENV NODE_ENV=production
 
 FROM base AS deps
+ENV NODE_ENV=development
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
@@ -18,6 +18,7 @@ RUN node -e "const fs=require('fs');const p='package-lock.json';if(!fs.existsSyn
   && npm install --no-audit --no-fund
 
 FROM base AS builder
+ENV NODE_ENV=development
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json package-lock.json tsconfig.json register-paths.cjs ./
 COPY src ./src
@@ -25,6 +26,7 @@ COPY src ./src
 RUN npm run build
 
 FROM base AS runner
+ENV NODE_ENV=production
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*
@@ -38,6 +40,8 @@ RUN groupadd --system --gid 1001 app \
 COPY package.json register-paths.cjs ./
 COPY --from=deps --chown=app:app /app/node_modules ./node_modules
 COPY --from=builder --chown=app:app /app/dist ./dist
+
+RUN npm prune --omit=dev
 
 RUN mkdir -p storage/uploads storage/processed storage/avatars storage/logs \
   && chown -R app:app storage
