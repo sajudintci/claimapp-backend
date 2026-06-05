@@ -11,8 +11,13 @@ const envSchema = z.object({
   JWT_REFRESH_SECRET: z.string().min(10),
   ACCESS_TOKEN_EXPIRES_IN: z.string().default("15m"),
   REFRESH_TOKEN_EXPIRES_IN: z.string().default("7d"),
+  /** Full URL (recommended for managed Redis). Overrides HOST/PORT/PASSWORD when set. */
+  REDIS_URL: z.string().optional(),
   REDIS_HOST: z.string().default("127.0.0.1"),
   REDIS_PORT: z.coerce.number().default(6379),
+  REDIS_USERNAME: z.string().optional(),
+  REDIS_PASSWORD: z.string().optional(),
+  REDIS_DB: z.coerce.number().default(0),
   STORAGE_PATH: z.string().default("./storage"),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
   RATE_LIMIT_MAX: z.coerce.number().default(100),

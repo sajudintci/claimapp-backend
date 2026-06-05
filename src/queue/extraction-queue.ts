@@ -1,5 +1,6 @@
 import { Job, Queue, Worker } from "bullmq";
 import { env } from "@/config/env";
+import { getRedisConnection } from "@/config/redis";
 import { ClaimDocumentModel } from "@/database/models/claim-document.model";
 import { ExtractionJobModel } from "@/database/models/extraction-job.model";
 import { ExtractionResultModel } from "@/database/models/extraction-result.model";
@@ -26,7 +27,7 @@ import {
 import { AuditAction } from "@/modules/audit/domain/audit-actions";
 import { writeSystemAudit } from "@/utils/audit-request";
 
-const connection = { host: env.REDIS_HOST, port: env.REDIS_PORT };
+const connection = getRedisConnection();
 export const extractionQueue = new Queue("extraction-queue", { connection });
 
 type ExtractionPayload = { claimId: string; extractionJobId: string };
