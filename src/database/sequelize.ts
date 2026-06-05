@@ -42,8 +42,35 @@ export const sequelize = new Sequelize(env.DATABASE_URL, {
   ],
 });
 
+function databaseNameFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const name = parsed.pathname.replace(/^\//, "");
+    return name || "postgres";
+  } catch {
+    return "(unknown)";
+  }
+}
+
 export async function initDatabase() {
-  await sequelize.authenticate();
+  try {
+    await sequelize.authenticate();
+  } catch (err) {
+    const code =
+      (err as { parent?: { code?: string }; original?: { code?: string } })
+        .parent?.code ??
+      (err as { original?: { code?: string } }).original?.code;
+
+    if (code === "3D000") {
+      const db = databaseNameFromUrl(env.DATABASE_URL);
+      logger.error(
+        `PostgreSQL database "${db}" does not exist (error 3D000). ` +
+          `Create it on the server (CREATE DATABASE ${db};) or set DATABASE_URL to an existing database name. ` +
+          `On Coolify/Docker, configure DATABASE_URL in the app Environment tab — the local .env file is not used in production.`,
+      );
+    }
+    throw err;
+  }
   await ensureOcrCreditsSchema(sequelize);
   await ensureUserAvatarSchema(sequelize);
   await sequelize.sync();

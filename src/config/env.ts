@@ -1,7 +1,10 @@
 import dotenv from "dotenv";
 import { z } from "zod";
 
-dotenv.config();
+// In Docker/Coolify, set runtime env vars — .env is not copied into the image.
+if (process.env.NODE_ENV !== "production") {
+  dotenv.config();
+}
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),

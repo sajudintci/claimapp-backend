@@ -56,9 +56,19 @@ docker run -p 4000:4000 \
   claimora-backend
 ```
 
-**Coolify (repo backend saja):** Base Directory = `/`, Dockerfile = `Dockerfile`. Set semua env dari `.env.example`. Volume disarankan untuk `/app/storage`.
+**Coolify (folder `backend/`):** Base Directory = `backend`, Dockerfile = `Dockerfile`.
 
-Satu container menjalankan API + worker ekstraksi (BullMQ). PostgreSQL dan Redis harus reachable dari container.
+1. **Environment** — salin variabel dari `.env.example` ke tab **Environment** di Coolify (bukan file `.env` di repo; file itu tidak masuk image).
+2. **PostgreSQL** — `DATABASE_URL` harus mengarah ke database yang **sudah ada**. Contoh Coolify internal:
+   `postgres://postgres:PASSWORD@postgres-service-name:5432/postgres`
+   Jika URL berakhir dengan `/claimora`, buat dulu database tersebut di Postgres:
+   `CREATE DATABASE claimora;`
+   Error `3D000` / `SequelizeConnectionError` = nama database di URL tidak ditemukan.
+3. **Redis** — `REDIS_URL=redis://user:pass@redis-host:6379/0` atau `REDIS_HOST` + `REDIS_PASSWORD`.
+4. **Volume** — mount `/app/storage` untuk upload dokumen.
+5. Jangan set secret (`JWT_*`, `OPENAI_*`, `ABBYY_*`) sebagai **build** env — hanya **runtime**.
+
+Satu container menjalankan API + worker ekstraksi (BullMQ). PostgreSQL dan Redis harus reachable dari container (hostname service Coolify, bukan `localhost`).
 
 ## Scripts
 
