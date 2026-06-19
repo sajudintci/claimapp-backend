@@ -22,14 +22,18 @@ const STAGE_INDEX = new Map(
   EXTRACTION_PROGRESS_STAGES.map((stage, index) => [stage.id, index]),
 );
 
+function isKnownPipelineStage(
+  value: string,
+): value is (typeof EXTRACTION_PROGRESS_STAGES)[number]["id"] {
+  return EXTRACTION_PROGRESS_STAGES.some((stage) => stage.id === value);
+}
+
 function normalizePipelineStage(
   progressStage?: string | null,
 ): (typeof EXTRACTION_PROGRESS_STAGES)[number]["id"] | null {
   if (!progressStage) return null;
   if (progressStage === "completed" || progressStage === "failed") return null;
-  return STAGE_INDEX.has(progressStage)
-    ? (progressStage as (typeof EXTRACTION_PROGRESS_STAGES)[number]["id"])
-    : null;
+  return isKnownPipelineStage(progressStage) ? progressStage : null;
 }
 
 export function resolveExtractionProgress(input: {

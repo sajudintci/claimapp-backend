@@ -163,10 +163,22 @@ export function setTracedFieldByPath(
     };
     return next;
   }
-  next[section] = {
-    ...next[section],
-    [fieldName]: field,
-  };
+
+  switch (section) {
+    case "provider":
+      next.provider = { ...next.provider, [fieldName]: field };
+      break;
+    case "billing":
+      next.billing = { ...next.billing, [fieldName]: field };
+      break;
+    case "patient":
+      next.patient = { ...next.patient, [fieldName]: field };
+      break;
+    case "encounter":
+      next.encounter = { ...next.encounter, [fieldName]: field };
+      break;
+  }
+
   return next;
 }
 
