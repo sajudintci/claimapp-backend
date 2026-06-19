@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import { randomUUID } from "crypto";
+import { env } from "@/config/env";
 
 type ApiErrorPayload = {
   type?: string;
@@ -36,7 +37,7 @@ function buildMeta(req: Request, pagination?: ApiMeta["pagination"]): ApiMeta {
   return {
     timestamp: new Date().toISOString(),
     requestId: req.requestId,
-    version: "v1",
+    version: env.API_VERSION,
     ...(pagination ? { pagination } : {}),
   };
 }

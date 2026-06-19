@@ -8,9 +8,7 @@ import { UserRoleModel } from "@/database/models/user-role.model";
 import { RefreshTokenModel } from "@/database/models/refresh-token.model";
 import { createId } from "@/utils/id";
 import { mapUserListItem } from "@/modules/identity-access/application/user-mapper";
-import { LocalStorageService } from "@/storage/local/local-storage.service";
-
-const avatarStorage = new LocalStorageService();
+import { getStorageService } from "@/storage/storage.factory";
 
 const AVATAR_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
@@ -209,7 +207,8 @@ export async function updateUserAvatar(params: {
     throw new Error("USER_NOT_FOUND");
   }
 
-  const saved = await avatarStorage.saveAvatar(params.file);
+  const storage = getStorageService();
+  const saved = await storage.saveAvatar(params.file);
   const previous = user.avatarFileName;
 
   await UserModel.update(
@@ -218,7 +217,7 @@ export async function updateUserAvatar(params: {
   );
 
   if (previous && previous !== saved.fileName) {
-    await avatarStorage.deleteAvatarFile(previous);
+    await storage.deleteAvatarFile(previous);
   }
 
   const refreshed = await loadUserForOrg(params.userId, params.organizationId);
@@ -236,7 +235,7 @@ export async function removeUserAvatar(params: {
   }
 
   if (user.avatarFileName) {
-    await avatarStorage.deleteAvatarFile(user.avatarFileName);
+    await getStorageService().deleteAvatarFile(user.avatarFileName);
   }
 
   await UserModel.update(

@@ -1,54 +1,95 @@
 import { Router } from "express";
-import path from "path";
 import multer from "multer";
 import { authMiddleware } from "@/middlewares/auth.middleware";
 import { ClaimsService } from "@/modules/claims/application/claims.service";
-import { LocalStorageService } from "@/storage/local/local-storage.service";
+import {
+  exportClaimsCsv,
+  listClaimReviewers,
+  listClaims,
+} from "@/modules/claims/application/claims-list.service";
+import { parseClaimListQuery } from "@/modules/claims/domain/claim-list-filters";
+import { getStorageService, openStorageRefStream } from "@/storage/storage.factory";
 import { ClaimModel } from "@/database/models/claim.model";
 import { ClaimDocumentModel } from "@/database/models/claim-document.model";
 import { ExtractionJobModel } from "@/database/models/extraction-job.model";
 import { ExtractionResultModel } from "@/database/models/extraction-result.model";
-import { toPagination } from "@/utils/pagination";
+import { UserModel } from "@/database/models/user.model";
+import { mapExtractionJobDto } from "@/modules/extraction/application/extraction-job-mapper";
+import { parseClaimReviewMeta } from "@/modules/claims/domain/claim-review-result";
+import { parseClaimUploadMetadata } from "@/modules/claims/domain/claim-upload-metadata";
 import { AuditAction } from "@/modules/audit/domain/audit-actions";
 import { writeAuditFromRequest } from "@/utils/audit-request";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const router = Router();
-const claimsService = new ClaimsService(new LocalStorageService());
+const claimsService = new ClaimsService(getStorageService());
 
 router.use(authMiddleware);
 
 router.get("/", async (req, res) => {
-  const { page, limit, status } = req.query;
-  const pg = toPagination(Number(page), Number(limit));
-  const where: Record<string, unknown> = { organizationId: req.auth?.org };
-  if (status) where.status = status;
+  const org = req.auth?.org;
+  if (!org) {
+    return res.fail({
+      status: 401,
+      code: "UNAUTHORIZED",
+      message: "Organization context is required",
+    });
+  }
 
-  const result = await ClaimModel.findAndCountAll({
-    where,
-    limit: pg.limit,
-    offset: pg.offset,
-    order: [["createdAt", "DESC"]]
+  const parsed = parseClaimListQuery(req.query as Record<string, unknown>);
+  const result = await listClaims({ organizationId: org, ...parsed });
+  return res.success({ items: result.items }, { pagination: result.pagination });
+});
+
+router.get("/reviewers", async (req, res) => {
+  const org = req.auth?.org;
+  if (!org) {
+    return res.fail({
+      status: 401,
+      code: "UNAUTHORIZED",
+      message: "Organization context is required",
+    });
+  }
+
+  const reviewers = await listClaimReviewers(org);
+  return res.success({ items: reviewers });
+});
+
+router.get("/export", async (req, res) => {
+  const org = req.auth?.org;
+  if (!org) {
+    return res.fail({
+      status: 401,
+      code: "UNAUTHORIZED",
+      message: "Organization context is required",
+    });
+  }
+
+  const parsed = parseClaimListQuery(req.query as Record<string, unknown>);
+  const csv = await exportClaimsCsv({
+    organizationId: org,
+    status: parsed.status,
+    q: parsed.q,
+    reviewerId: parsed.reviewerId,
+    unassigned: parsed.unassigned,
   });
 
-  const totalRows = Number(result.count);
-  const totalPages = Math.max(1, Math.ceil(totalRows / pg.limit));
-  res.success(
-    { items: result.rows },
-    {
-      pagination: {
-        page: pg.page,
-        limit: pg.limit,
-        totalRows,
-        totalPages,
-      },
-    },
-  );
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="claims-export.csv"');
+  return res.send(csv);
 });
 
 router.get("/:claimId", async (req, res) => {
   const claim = await ClaimModel.findOne({
-    where: { id: req.params.claimId, organizationId: req.auth?.org }
+    where: { id: req.params.claimId, organizationId: req.auth?.org },
+    include: [
+      {
+        model: UserModel,
+        as: "reviewer",
+        attributes: ["id", "name", "email"],
+        required: false,
+      },
+    ],
   });
   if (!claim) {
     return res.fail({
@@ -65,7 +106,12 @@ router.get("/:claimId", async (req, res) => {
     ExtractionResultModel.findOne({ where: { claimId: claim.id }, order: [["createdAt", "DESC"]] })
   ]);
 
-  return res.success({ claim, documents, latestJob, latestResult });
+  return res.success({
+    claim,
+    documents,
+    latestJob: latestJob ? mapExtractionJobDto(latestJob) : null,
+    latestResult,
+  });
 });
 
 router.get("/:claimId/documents/:documentId/preview", async (req, res) => {
@@ -96,7 +142,19 @@ router.get("/:claimId/documents/:documentId/preview", async (req, res) => {
 
   res.setHeader("Content-Type", document.mimeType);
   res.setHeader("Content-Disposition", `inline; filename="${document.originalName}"`);
-  return res.sendFile(path.resolve(document.storagePath));
+
+  const { stream } = await openStorageRefStream(document.storagePath);
+  stream.on("error", (err) => {
+    if (!res.headersSent) {
+      res.fail({
+        status: 500,
+        code: "DOCUMENT_READ_FAILED",
+        message: "Failed to read document",
+        error: { type: "StorageError", details: err.message },
+      });
+    }
+  });
+  return stream.pipe(res);
 });
 
 router.post("/upload", upload.single("document"), async (req, res) => {
@@ -119,10 +177,19 @@ router.post("/upload", upload.single("document"), async (req, res) => {
   }
 
   try {
+    const reviewerId =
+      typeof req.body.reviewerId === "string" && req.body.reviewerId.trim()
+        ? req.body.reviewerId.trim()
+        : null;
+
+    const uploadMetadata = parseClaimUploadMetadata(req.body as Record<string, unknown>);
+
     const data = await claimsService.uploadClaim({
       organizationId: req.auth!.org,
       createdBy: req.auth!.sub,
       claimNumber: req.body.claimNumber ?? `CLM-${Date.now()}`,
+      reviewerId,
+      metadata: uploadMetadata,
       file: req.file,
     });
 
@@ -135,6 +202,7 @@ router.post("/upload", upload.single("document"), async (req, res) => {
         fileName: req.file.originalname,
         mimeType: req.file.mimetype,
         extractionJobId: data.extractionJob.id,
+        metadata: uploadMetadata,
         result: "Success",
       },
     });
@@ -184,7 +252,7 @@ router.get("/:claimId/extraction-status", async (req, res) => {
       error: { type: "NotFoundError" },
     });
   }
-  return res.success(job);
+  return res.success(mapExtractionJobDto(job));
 });
 
 router.post("/:claimId/extraction/retry", async (req, res) => {
@@ -277,8 +345,15 @@ router.patch("/:claimId/review", async (req, res) => {
   }
 
   const nextStatus = req.body.status ?? "Reviewed";
+  const reviewedResult = req.body.reviewedResult as Record<string, unknown> | null | undefined;
+  const reviewMeta = parseClaimReviewMeta(reviewedResult);
+
   await ClaimModel.update(
-    { reviewedResult: req.body.reviewedResult, status: nextStatus },
+    {
+      reviewedResult: reviewedResult ?? null,
+      status: nextStatus,
+      reviewerId: req.auth?.sub ?? null,
+    },
     { where: { id: req.params.claimId, organizationId: req.auth?.org } },
   );
 
@@ -287,7 +362,11 @@ router.patch("/:claimId/review", async (req, res) => {
     entityType: "claim",
     entityId: req.params.claimId,
     beforeChanges: { status: existing.status },
-    afterChanges: { status: nextStatus, result: "Success" },
+    afterChanges: {
+      status: nextStatus,
+      reviewedFieldCount: reviewMeta.reviewedFieldKeys.length,
+      result: "Success",
+    },
   });
 
   const updated = await ClaimModel.findByPk(req.params.claimId);

@@ -33,6 +33,8 @@ RUN apt-get update \
 
 ENV PORT=4000
 ENV STORAGE_PATH=/app/storage
+ENV STORAGE_DRIVER=s3
+ENV LOG_DIR=/app/storage/logs
 
 RUN groupadd --system --gid 1001 app \
   && useradd --system --uid 1001 --gid app app
@@ -43,7 +45,7 @@ COPY --from=builder --chown=app:app /app/dist ./dist
 
 RUN npm prune --omit=dev
 
-RUN mkdir -p storage/uploads storage/processed storage/avatars storage/logs \
+RUN mkdir -p storage/logs \
   && chown -R app:app storage
 
 USER app

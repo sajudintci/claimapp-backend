@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "@/config/env";
+import { syncRequestContextFromAuth } from "@/infrastructure/logger/request-context";
 
 export type AuthPayload = { sub: string; org: string; email: string; roles?: string[] };
 
@@ -25,6 +26,7 @@ export const authMiddleware = (req: Request, res: Response, next: NextFunction) 
   try {
     const payload = jwt.verify(token, env.JWT_SECRET) as AuthPayload;
     req.auth = payload;
+    syncRequestContextFromAuth(req);
     return next();
   } catch {
     return res.fail({

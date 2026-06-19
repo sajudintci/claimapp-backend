@@ -1,15 +1,17 @@
 import { Op } from "sequelize";
+import { sequelize } from "@/database/sequelize";
 import { ClaimDocumentModel } from "@/database/models/claim-document.model";
 import { ClaimModel } from "@/database/models/claim.model";
 import { ExtractionJobModel } from "@/database/models/extraction-job.model";
 import { createId } from "@/utils/id";
 import { StorageService } from "@/storage/storage.interface";
-import { enqueueExtraction } from "@/queue/extraction-queue";
+import { queueExtractionRequested } from "@/modules/shared/application/outbox.service";
 import {
   assertSufficientOcrCredits,
   ensureOrganizationOcrCredits,
   InsufficientOcrCreditsError,
 } from "@/modules/ocr-credits/application/ocr-credits.service";
+import type { ClaimUploadMetadata } from "@/modules/claims/domain/claim-upload-metadata";
 
 export class ClaimsService {
   constructor(private readonly storage: StorageService) {}
@@ -19,6 +21,8 @@ export class ClaimsService {
     createdBy: string;
     claimNumber: string;
     file: Express.Multer.File;
+    reviewerId?: string | null;
+    metadata?: ClaimUploadMetadata | null;
   }) {
     await ensureOrganizationOcrCredits(params.organizationId);
     try {
@@ -30,41 +34,57 @@ export class ClaimsService {
       throw err;
     }
 
-    const claim = await ClaimModel.create(
-      {
-        id: createId(),
-        organizationId: params.organizationId,
-        createdBy: params.createdBy,
-        claimNumber: params.claimNumber,
-        status: "Processing",
-        extractionResult: null,
-        reviewedResult: null
-      } as any
-    );
-
+    const claimId = createId();
+    const documentId = createId();
+    const extractionJobId = createId();
     const uploaded = await this.storage.saveUpload(params.file);
 
-    await ClaimDocumentModel.create(
-      {
-        id: createId(),
-        claimId: claim.id,
-        originalName: params.file.originalname,
-        mimeType: params.file.mimetype,
-        storagePath: uploaded.path
-      } as any
-    );
+    const { claim, extractionJob } = await sequelize.transaction(async (transaction) => {
+      const claim = await ClaimModel.create(
+        {
+          id: claimId,
+          organizationId: params.organizationId,
+          createdBy: params.createdBy,
+          claimNumber: params.claimNumber,
+          reviewerId: params.reviewerId ?? null,
+          status: "Processing",
+          extractionResult: null,
+          reviewedResult: null,
+          metadata: params.metadata ?? null,
+        } as any,
+        { transaction },
+      );
 
-    const extractionJob = await ExtractionJobModel.create(
-      {
-        id: createId(),
-        claimId: claim.id,
-        status: "QUEUED",
-        attempts: 0,
-        errorMessage: null
-      } as any
-    );
+      await ClaimDocumentModel.create(
+        {
+          id: documentId,
+          claimId: claim.id,
+          originalName: params.file.originalname,
+          mimeType: params.file.mimetype,
+          storagePath: uploaded.path,
+        } as any,
+        { transaction },
+      );
 
-    await enqueueExtraction({ claimId: claim.id, extractionJobId: extractionJob.id });
+      const extractionJob = await ExtractionJobModel.create(
+        {
+          id: extractionJobId,
+          claimId: claim.id,
+          status: "QUEUED",
+          progressStage: "queued",
+          attempts: 0,
+          errorMessage: null,
+        } as any,
+        { transaction },
+      );
+
+      await queueExtractionRequested(
+        { claimId: claim.id, extractionJobId: extractionJob.id },
+        transaction,
+      );
+
+      return { claim, extractionJob };
+    });
 
     return { claim, extractionJob };
   }
@@ -103,22 +123,33 @@ export class ClaimsService {
       throw new Error("EXTRACTION_ALREADY_IN_PROGRESS");
     }
 
-    const extractionJob = await ExtractionJobModel.create(
-      {
-        id: createId(),
-        claimId: claim.id,
-        status: "QUEUED",
-        attempts: 0,
-        errorMessage: null,
-      } as any,
-    );
+    const extractionJobId = createId();
 
-    await ClaimModel.update(
-      { status: "Processing", extractionResult: null },
-      { where: { id: claim.id } },
-    );
+    const extractionJob = await sequelize.transaction(async (transaction) => {
+      const extractionJob = await ExtractionJobModel.create(
+        {
+          id: extractionJobId,
+          claimId: claim.id,
+          status: "QUEUED",
+          progressStage: "queued",
+          attempts: 0,
+          errorMessage: null,
+        } as any,
+        { transaction },
+      );
 
-    await enqueueExtraction({ claimId: claim.id, extractionJobId: extractionJob.id });
+      await ClaimModel.update(
+        { status: "Processing", extractionResult: null },
+        { where: { id: claim.id }, transaction },
+      );
+
+      await queueExtractionRequested(
+        { claimId: claim.id, extractionJobId: extractionJob.id },
+        transaction,
+      );
+
+      return extractionJob;
+    });
 
     return { claimId: claim.id, extractionJob };
   }

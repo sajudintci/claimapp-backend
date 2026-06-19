@@ -1,7 +1,7 @@
-import fs from "fs/promises";
-import path from "path";
 import { env } from "@/config/env";
 import { logger } from "@/infrastructure/logger/winston";
+import { abbyyCircuitBreaker } from "@/infrastructure/resilience/circuit-breakers";
+import { abbyyBulkhead } from "@/infrastructure/resilience/bulkheads";
 
 type VantageTokenResponse = {
   access_token?: string;
@@ -135,17 +135,11 @@ export async function resolveAbbyySkillId(): Promise<string> {
 async function launchTransaction(
   token: string,
   skillId: string,
-  storagePath: string,
-  mimeType: string,
-  originalFileName: string,
+  file: { buffer: Buffer; mimeType: string; fileName: string },
 ): Promise<string> {
-  const resolvedPath = path.isAbsolute(storagePath) ? storagePath : path.resolve(storagePath);
-  const buffer = await fs.readFile(resolvedPath);
-  const fileName = originalFileName.trim() || path.basename(resolvedPath);
   const form = new FormData();
-  // Plain JSON field (matches Postman/cURL); Blob would send an extra file part.
   form.append("Model", JSON.stringify({ files: [{}] }));
-  form.append("Files", new Blob([buffer], { type: mimeType }), fileName);
+  form.append("Files", new Blob([new Uint8Array(file.buffer)], { type: file.mimeType }), file.fileName);
 
   const response = await fetch(
     `${publicApiUrl("/transactions/launch")}?skillId=${encodeURIComponent(skillId)}`,
@@ -247,40 +241,46 @@ export type AbbyyProcessResult = {
 };
 
 export async function processDocumentWithAbbyy(
-  storagePath: string,
-  mimeType: string,
-  originalFileName?: string,
+  file: { buffer: Buffer; mimeType: string; originalFileName?: string },
 ): Promise<AbbyyProcessResult> {
-  const token = await getAccessToken();
-  const skillId = await resolveAbbyySkillId();
-  const fileName = originalFileName?.trim() || path.basename(storagePath);
+  return abbyyCircuitBreaker.execute(() =>
+    abbyyBulkhead.run(async () => {
+      const token = await getAccessToken();
+      const skillId = await resolveAbbyySkillId();
+      const fileName = file.originalFileName?.trim() || "document";
 
-  logger.info("ABBYY Vantage launch", { storagePath, mimeType, skillId, fileName });
+      logger.info("ABBYY Vantage launch", { mimeType: file.mimeType, skillId, fileName });
 
-  const transactionId = await launchTransaction(token, skillId, storagePath, mimeType, fileName);
-  const transaction = await waitForTransaction(token, transactionId);
-  const resultFiles = collectResultFileIds(transaction);
+      const transactionId = await launchTransaction(token, skillId, {
+        buffer: file.buffer,
+        mimeType: file.mimeType,
+        fileName,
+      });
+      const transaction = await waitForTransaction(token, transactionId);
+      const resultFiles = collectResultFileIds(transaction);
 
-  if (resultFiles.length === 0) {
-    throw new Error("ABBYY transaction completed but no result files returned");
-  }
+      if (resultFiles.length === 0) {
+        throw new Error("ABBYY transaction completed but no result files returned");
+      }
 
-  const rawResults: AbbyyProcessResult["rawResults"] = [];
-  for (const file of resultFiles) {
-    const downloaded = await downloadResultFile(token, transactionId, file.fileId);
-    rawResults.push({
-      fileId: file.fileId,
-      type: file.type,
-      contentType: downloaded.contentType,
-      body: downloaded.body,
-    });
-  }
+      const rawResults: AbbyyProcessResult["rawResults"] = [];
+      for (const file of resultFiles) {
+        const downloaded = await downloadResultFile(token, transactionId, file.fileId);
+        rawResults.push({
+          fileId: file.fileId,
+          type: file.type,
+          contentType: downloaded.contentType,
+          body: downloaded.body,
+        });
+      }
 
-  logger.info("ABBYY Vantage completed", {
-    transactionId,
-    skillId,
-    resultFileCount: rawResults.length,
-  });
+      logger.info("ABBYY Vantage completed", {
+        transactionId,
+        skillId,
+        resultFileCount: rawResults.length,
+      });
 
-  return { transactionId, skillId, rawResults };
+      return { transactionId, skillId, rawResults };
+    }),
+  );
 }

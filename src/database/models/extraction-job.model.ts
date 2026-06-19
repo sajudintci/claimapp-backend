@@ -11,6 +11,9 @@ export class ExtractionJobModel extends BaseModel<ExtractionJobModel> {
   @Column(DataType.STRING)
   declare status: string;
 
+  @Column({ type: DataType.STRING, allowNull: true })
+  declare progressStage: string | null;
+
   @Column(DataType.INTEGER)
   declare attempts: number;
 

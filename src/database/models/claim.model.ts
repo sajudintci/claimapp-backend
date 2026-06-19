@@ -14,6 +14,10 @@ export class ClaimModel extends BaseModel<ClaimModel> {
   @Column(DataType.UUID)
   declare createdBy: string;
 
+  @ForeignKey(() => UserModel)
+  @Column({ type: DataType.UUID, allowNull: true })
+  declare reviewerId: string | null;
+
   @Column(DataType.STRING)
   declare claimNumber: string;
 
@@ -26,8 +30,14 @@ export class ClaimModel extends BaseModel<ClaimModel> {
   @Column(DataType.JSONB)
   declare reviewedResult: Record<string, unknown> | null;
 
+  @Column({ type: DataType.JSONB, allowNull: true })
+  declare metadata: Record<string, unknown> | null;
+
   @BelongsTo(() => OrganizationModel)
   declare organization: OrganizationModel;
+
+  @BelongsTo(() => UserModel, { foreignKey: "reviewerId", as: "reviewer" })
+  declare reviewer: UserModel;
 
   @HasMany(() => ClaimDocumentModel)
   declare documents: ClaimDocumentModel[];

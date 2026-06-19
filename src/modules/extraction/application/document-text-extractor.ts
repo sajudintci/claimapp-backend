@@ -6,6 +6,7 @@ import {
 } from "@/modules/extraction/application/ocr-preprocess";
 import { abbyyResultsToOcrText } from "@/modules/extraction/application/vantage-result-to-text";
 import { processDocumentWithAbbyy } from "@/modules/extraction/infrastructure/abbyy-vantage-client";
+import { readStorageRef } from "@/storage/storage.factory";
 
 export type TextExtractionSource = "abbyy-vantage";
 
@@ -46,11 +47,12 @@ export async function extractTextFromDocument(
     mimeType,
   });
 
-  const abbyyResult = await processDocumentWithAbbyy(
-    storagePath,
+  const fileBuffer = await readStorageRef(storagePath);
+  const abbyyResult = await processDocumentWithAbbyy({
+    buffer: fileBuffer,
     mimeType,
-    logContext?.originalFileName,
-  );
+    originalFileName: logContext?.originalFileName,
+  });
   const ocrOutput = abbyyResultsToOcrText(abbyyResult);
   const text = normalizeWhitespace(ocrOutput.text);
   const sufficiencySource = ocrOutput.filteredPlainText ?? text;

@@ -2,6 +2,10 @@ import fs from "fs";
 import path from "path";
 import { env } from "@/config/env";
 import { logger } from "@/infrastructure/logger/winston";
+import { CircuitBreakerOpenError } from "@/infrastructure/resilience/circuit-breaker-open.error";
+import { openaiCircuitBreaker } from "@/infrastructure/resilience/circuit-breakers";
+import { BulkheadRejectedError } from "@/infrastructure/resilience/bulkhead-rejected.error";
+import { openaiBulkhead } from "@/infrastructure/resilience/bulkheads";
 import {
   buildSummaryFromClaims,
   computeAggregateConfidence,
@@ -11,6 +15,10 @@ import {
   LlmParseFailureReason,
   LlmParseResult,
 } from "@/modules/extraction/application/llm-json-parse";
+import {
+  enrichClaimsWithClinicalSynthesis,
+} from "@/modules/extraction/application/clinical-field-synthesis";
+import { updateExtractionJobProgress } from "@/modules/extraction/application/extraction-job-progress";
 import {
   verifyAndRepairExtraction,
   type ExtractionVerificationStats,
@@ -116,6 +124,13 @@ function normalizeTracedField(input: unknown, monetary = false): TracedField {
     value = "not_found";
   }
 
+  const valueOriginRaw = input.value_origin;
+  const value_origin =
+    valueOriginRaw === "llm_synthesis" || valueOriginRaw === "ocr" ? valueOriginRaw : undefined;
+  const derived_from = Array.isArray(input.derived_from)
+    ? input.derived_from.filter((entry): entry is string => typeof entry === "string")
+    : undefined;
+
   return {
     value,
     source_text:
@@ -124,6 +139,8 @@ function normalizeTracedField(input: unknown, monetary = false): TracedField {
         : "",
     page: typeof input.page === "number" ? input.page : null,
     confidence: value === "not_found" ? 0 : confidence,
+    ...(value_origin ? { value_origin } : {}),
+    ...(derived_from && derived_from.length > 0 ? { derived_from } : {}),
   };
 }
 
@@ -338,31 +355,37 @@ async function callLlmOnce(params: {
     .join("\n");
 
   try {
-    const response = await fetchWithTimeout(
-      `${env.OPENAI_BASE_URL}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+    openaiCircuitBreaker.guard();
+    const response = await openaiBulkhead.run(() =>
+      fetchWithTimeout(
+        `${env.OPENAI_BASE_URL}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: env.OPENAI_MODEL,
+            temperature: 0,
+            max_tokens: env.LLM_MAX_OUTPUT_TOKENS,
+            response_format: { type: "json_object" },
+            messages: [
+              { role: "system", content: systemContent },
+              { role: "user", content: `Raw OCR text:\n${params.ocrText}` },
+            ],
+          }),
         },
-        body: JSON.stringify({
-          model: env.OPENAI_MODEL,
-          temperature: 0,
-          max_tokens: env.LLM_MAX_OUTPUT_TOKENS,
-          response_format: { type: "json_object" },
-          messages: [
-            { role: "system", content: systemContent },
-            { role: "user", content: `Raw OCR text:\n${params.ocrText}` },
-          ],
-        }),
-      },
-      env.LLM_REQUEST_TIMEOUT_MS,
+        env.LLM_REQUEST_TIMEOUT_MS,
+      ),
     );
 
     if (!response.ok) {
       const errText = await response.text();
       const retryable = shouldRetryLlm(response.status, null);
+      if (retryable) {
+        openaiCircuitBreaker.recordFailure();
+      }
       return {
         ok: false,
         result: null,
@@ -429,6 +452,7 @@ async function callLlmOnce(params: {
       };
     }
 
+    openaiCircuitBreaker.recordSuccess();
     return {
       ok: true,
       result: {
@@ -442,6 +466,30 @@ async function callLlmOnce(params: {
       finishReason,
     };
   } catch (err) {
+    if (err instanceof CircuitBreakerOpenError) {
+      return {
+        ok: false,
+        result: null,
+        error: err.message,
+        httpStatus: null,
+        retryable: false,
+      };
+    }
+
+    if (err instanceof BulkheadRejectedError) {
+      return {
+        ok: false,
+        result: null,
+        error: err.message,
+        httpStatus: null,
+        retryable: true,
+      };
+    }
+
+    if (shouldRetryLlm(null, err)) {
+      openaiCircuitBreaker.recordFailure();
+    }
+
     const message =
       err instanceof Error
         ? err.name === "AbortError"
@@ -472,6 +520,7 @@ export type LlmPostProcessOptions = {
   preExtracted?: PreExtractedFields;
   filteredPlainText?: string;
   ocrPageLines?: OcrPageLinesPayload[];
+  extractionJobId?: string;
 };
 
 export async function postProcessExtractionWithLlm(
@@ -510,14 +559,22 @@ export async function postProcessExtractionWithLlm(
       insistExtract,
     });
     if (outcome.ok && outcome.result) {
+      if (options?.extractionJobId) {
+        await updateExtractionJobProgress(options.extractionJobId, "validate");
+      }
+
       const verified = verifyAndRepairExtraction(outcome.result, {
         filteredPlainText: options?.filteredPlainText ?? rawText,
         ocrPageLines: options?.ocrPageLines,
         preExtracted: options?.preExtracted,
       });
+      const enriched = await enrichClaimsWithClinicalSynthesis(verified.result);
+      if (enriched.stats.fieldsSynthesized > 0) {
+        logger.info("Clinical field synthesis applied", enriched.stats);
+      }
       return {
         status: "ok",
-        result: verified.result,
+        result: enriched.result,
         verification: verified.stats,
         error: null,
         attempts: attempt,

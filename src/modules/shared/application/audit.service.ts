@@ -1,4 +1,5 @@
 import { AuditLogModel } from "@/database/models/audit-log.model";
+import { auditLogger } from "@/infrastructure/logger/winston";
 import { createId } from "@/utils/id";
 
 export type AuditInput = {
@@ -14,7 +15,20 @@ export type AuditInput = {
 
 export class AuditService {
   async log(input: AuditInput) {
-    await AuditLogModel.create(({ id: createId(), ...input } as any));
+    const id = createId();
+    await AuditLogModel.create(({ id, ...input } as any));
+
+    auditLogger.info("Audit event", {
+      auditId: id,
+      organizationId: input.organizationId,
+      userId: input.userId,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      ipAddress: input.ipAddress,
+      beforeChanges: input.beforeChanges ?? null,
+      afterChanges: input.afterChanges ?? null,
+    });
   }
 }
 

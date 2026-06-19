@@ -16,9 +16,14 @@ import { AuditLogModel } from "./models/audit-log.model";
 import { RefreshTokenModel } from "./models/refresh-token.model";
 import { NotificationModel } from "./models/notification.model";
 import { OcrCreditTransactionModel } from "./models/ocr-credit-transaction.model";
+import { OutboxMessageModel } from "./models/outbox-message.model";
 import { backfillOrganizationOcrCredits } from "@/modules/ocr-credits/application/ocr-credits.service";
 import { ensureOcrCreditsSchema } from "./migrations/ensure-ocr-credits-schema";
 import { ensureUserAvatarSchema } from "./migrations/ensure-user-avatar-schema";
+import { ensureOutboxSchema } from "./migrations/ensure-outbox-schema";
+import { ensureClaimMetadataSchema } from "./migrations/ensure-claim-metadata-schema";
+import { ensureClaimReviewerSchema } from "./migrations/ensure-claim-reviewer-schema";
+import { ensureExtractionJobProgressSchema } from "./migrations/ensure-extraction-job-progress-schema";
 
 export const sequelize = new Sequelize(env.DATABASE_URL, {
   dialect: "postgres",
@@ -39,6 +44,7 @@ export const sequelize = new Sequelize(env.DATABASE_URL, {
     RefreshTokenModel,
     NotificationModel,
     OcrCreditTransactionModel,
+    OutboxMessageModel,
   ],
 });
 
@@ -73,6 +79,10 @@ export async function initDatabase() {
   }
   await ensureOcrCreditsSchema(sequelize);
   await ensureUserAvatarSchema(sequelize);
+  await ensureOutboxSchema(sequelize);
+  await ensureClaimReviewerSchema(sequelize);
+  await ensureClaimMetadataSchema(sequelize);
+  await ensureExtractionJobProgressSchema(sequelize);
   await sequelize.sync();
   await backfillOrganizationOcrCredits();
   logger.info("Database initialized");

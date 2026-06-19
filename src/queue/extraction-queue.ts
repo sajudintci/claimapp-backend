@@ -16,7 +16,7 @@ import {
   isLlmPostProcessEnabled,
   postProcessExtractionWithLlm,
 } from "@/modules/extraction/application/llm-post-process";
-import { logger } from "@/infrastructure/logger/winston";
+import { updateExtractionJobProgress } from "@/modules/extraction/application/extraction-job-progress";
 import { createId } from "@/utils/id";
 import {
   assertSufficientOcrCredits,
@@ -26,6 +26,7 @@ import {
 } from "@/modules/ocr-credits/application/ocr-credits.service";
 import { AuditAction } from "@/modules/audit/domain/audit-actions";
 import { writeSystemAudit } from "@/utils/audit-request";
+import { logger } from "@/infrastructure/logger/winston";
 
 const connection = getRedisConnection();
 export const extractionQueue = new Queue("extraction-queue", { connection });
@@ -74,9 +75,21 @@ function resolveClaimStatus(params: {
 }
 
 export const enqueueExtraction = async (payload: ExtractionPayload) => {
+  const existing = await extractionQueue.getJob(payload.extractionJobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (state === "waiting" || state === "active" || state === "delayed") {
+      return;
+    }
+    if (state === "completed" || state === "failed") {
+      await existing.remove();
+    }
+  }
+
   await extractionQueue.add("extract", payload, {
+    jobId: payload.extractionJobId,
     attempts: 3,
-    backoff: { type: "exponential", delay: 3000 }
+    backoff: { type: "exponential", delay: 3000 },
   });
 };
 
@@ -85,7 +98,7 @@ export const initExtractionQueue = async () => {
     "extraction-queue",
     async (job: Job<ExtractionPayload>) => {
       await ExtractionJobModel.update(
-        { status: "PROCESSING", attempts: job.attemptsMade + 1 },
+        { status: "PROCESSING", attempts: job.attemptsMade + 1, progressStage: "ocr" },
         { where: { id: job.data.extractionJobId } },
       );
 
@@ -123,6 +136,8 @@ export const initExtractionQueue = async () => {
         extracted,
       );
 
+      await updateExtractionJobProgress(job.data.extractionJobId, "llm");
+
       const ocrCreditsRequired = creditsFromPageCount(extracted.ocrPageCount);
       await assertSufficientOcrCredits(claim.organizationId, ocrCreditsRequired);
 
@@ -137,6 +152,7 @@ export const initExtractionQueue = async () => {
             preExtracted: extracted.preExtracted,
             filteredPlainText: extracted.filteredPlainText ?? extracted.text,
             ocrPageLines: extracted.ocrPageLines,
+            extractionJobId: job.data.extractionJobId,
           })
         : {
             status: "failed" as const,
@@ -157,6 +173,7 @@ export const initExtractionQueue = async () => {
       const llmResult = llmOutcome.result;
       const llmSummary = buildExtractionSummaryFromLlm(llmResult);
       const claims = llmResult?.claims ?? [];
+
       const validation =
         claims.length > 0
           ? validateClaimsBilling(claims, env.BILLING_MISMATCH_TOLERANCE_PERCENT)
@@ -229,6 +246,8 @@ export const initExtractionQueue = async () => {
         ocrCreditsCharged: creditDebit.credits,
       };
 
+      await updateExtractionJobProgress(job.data.extractionJobId, "persist");
+
       await ExtractionResultModel.create({
         id: createId(),
         claimId: job.data.claimId,
@@ -245,7 +264,7 @@ export const initExtractionQueue = async () => {
       );
 
       await ExtractionJobModel.update(
-        { status: "COMPLETED", errorMessage: null },
+        { status: "COMPLETED", errorMessage: null, progressStage: "completed" },
         { where: { id: job.data.extractionJobId } },
       );
 
@@ -263,7 +282,10 @@ export const initExtractionQueue = async () => {
         },
       });
     },
-    { connection }
+    {
+      connection,
+      concurrency: env.BULKHEAD_EXTRACTION_WORKER_CONCURRENCY,
+    },
   );
 
   worker.on("failed", async (job, err) => {
@@ -282,6 +304,7 @@ export const initExtractionQueue = async () => {
           ? `Insufficient OCR credits (need ${err.required}, have ${err.remaining})`
           : err.message,
         attempts: job.attemptsMade + 1,
+        progressStage: "failed",
       },
       { where: { id: job.data.extractionJobId } },
     );
@@ -309,5 +332,7 @@ export const initExtractionQueue = async () => {
     }
   });
 
-  logger.info("Extraction queue initialized");
+  logger.info("Extraction queue initialized", {
+    workerConcurrency: env.BULKHEAD_EXTRACTION_WORKER_CONCURRENCY,
+  });
 };
