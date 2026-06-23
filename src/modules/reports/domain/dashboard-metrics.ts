@@ -186,6 +186,48 @@ export function buildWeeklyThroughput(
   return days;
 }
 
+function readFirstClaimFromExtractionResult(
+  extractionResult: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!extractionResult) return null;
+
+  const rootClaims = extractionResult.claims;
+  if (Array.isArray(rootClaims) && rootClaims.length > 0) {
+    const first = rootClaims[0];
+    return first && typeof first === "object" ? (first as Record<string, unknown>) : null;
+  }
+
+  const structured = extractionResult.structuredData;
+  if (structured && typeof structured === "object") {
+    const nestedClaims = (structured as Record<string, unknown>).claims;
+    if (Array.isArray(nestedClaims) && nestedClaims.length > 0) {
+      const first = nestedClaims[0];
+      return first && typeof first === "object" ? (first as Record<string, unknown>) : null;
+    }
+  }
+
+  return null;
+}
+
+export function readExtractedPatientName(
+  extractionResult: Record<string, unknown> | null,
+): string {
+  const firstClaim = readFirstClaimFromExtractionResult(extractionResult);
+  if (!firstClaim) return "not_found";
+
+  const patient = firstClaim.patient;
+  if (!patient || typeof patient !== "object") return "not_found";
+
+  const name = (patient as Record<string, unknown>).name;
+  if (!name || typeof name !== "object") return "not_found";
+
+  const value = (name as Record<string, unknown>).value;
+  if (value == null) return "not_found";
+
+  const text = String(value).trim();
+  return text.length > 0 ? text : "not_found";
+}
+
 export function readClaimSummary(
   extractionResult: Record<string, unknown> | null,
 ): { patientName: string; provider: string } {
@@ -194,10 +236,7 @@ export function readClaimSummary(
       ? (extractionResult.summary as Record<string, unknown>)
       : null;
 
-  const patientName =
-    typeof summary?.insuredName === "string" && summary.insuredName.trim()
-      ? summary.insuredName.trim()
-      : "—";
+  const patientName = readExtractedPatientName(extractionResult);
   const provider =
     typeof summary?.provider === "string" && summary.provider.trim() ? summary.provider.trim() : "—";
 

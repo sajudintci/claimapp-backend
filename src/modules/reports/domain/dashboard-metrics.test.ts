@@ -6,6 +6,7 @@ import {
   formatTrendPercent,
   isHighPriorityConfidence,
   readConfidencePercent,
+  readExtractedPatientName,
   toDashboardDisplayStatus,
 } from "@/modules/reports/domain/dashboard-metrics";
 
@@ -74,5 +75,33 @@ describe("dashboard-metrics domain", () => {
     expect(
       formatActivityTitle({ action: "EXTRACTION_STARTED", entityId: "CLM-2026-04129" }),
     ).toBe("CLM-2026-04129 extraction started");
+  });
+
+  it("reads patient name from extraction patient.name only", () => {
+    expect(
+      readExtractedPatientName({
+        summary: { insuredName: "From Summary" },
+        claims: [{ patient: { name: { value: "Dewi Susanti" } } }],
+      }),
+    ).toBe("Dewi Susanti");
+
+    expect(
+      readExtractedPatientName({
+        summary: { insuredName: "From Summary" },
+        claims: [{ patient: { name: { value: "not_found" } } }],
+      }),
+    ).toBe("not_found");
+
+    expect(readExtractedPatientName(null)).toBe("not_found");
+  });
+
+  it("reads patient name from structuredData.claims when root claims are absent", () => {
+    expect(
+      readExtractedPatientName({
+        structuredData: {
+          claims: [{ patient: { name: { value: "Via Structured Data" } } }],
+        },
+      }),
+    ).toBe("Via Structured Data");
   });
 });
