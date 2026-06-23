@@ -25,16 +25,16 @@ import {
   isValidMonetaryValue,
 } from "@/modules/extraction/application/extraction-verify";
 import {
-  OcrPageLinesPayload,
-  PreExtractedFields,
-} from "@/modules/extraction/application/ocr-preprocess";
-import {
   ExtractionClaim,
   ExtractionLineItem,
   ExtractionTestResult,
   LlmExtractionResult,
   TracedField,
 } from "@/modules/extraction/domain/extraction-schema";
+import {
+  attachTracesToField,
+  normalizeFieldTraces,
+} from "@/modules/extraction/domain/field-trace";
 
 const OCR_PLACEHOLDER = "{{RAW_OCR_TEXT}}";
 const DEFAULT_OCR_MAX_CHARS = 24000;
@@ -131,17 +131,22 @@ function normalizeTracedField(input: unknown, monetary = false): TracedField {
     ? input.derived_from.filter((entry): entry is string => typeof entry === "string")
     : undefined;
 
-  return {
+  const source_text =
+    typeof input.source_text === "string"
+      ? input.source_text.slice(0, MAX_SOURCE_TEXT_CHARS)
+      : "";
+  const page = typeof input.page === "number" ? input.page : null;
+  const traces = normalizeFieldTraces(input, { source_text, page });
+
+  return attachTracesToField({
     value,
-    source_text:
-      typeof input.source_text === "string"
-        ? input.source_text.slice(0, MAX_SOURCE_TEXT_CHARS)
-        : "",
-    page: typeof input.page === "number" ? input.page : null,
+    source_text,
+    page,
     confidence: value === "not_found" ? 0 : confidence,
+    ...(traces.length > 0 ? { traces } : {}),
     ...(value_origin ? { value_origin } : {}),
     ...(derived_from && derived_from.length > 0 ? { derived_from } : {}),
-  };
+  });
 }
 
 function normalizeLineItem(input: unknown): ExtractionLineItem | null {
@@ -149,16 +154,20 @@ function normalizeLineItem(input: unknown): ExtractionLineItem | null {
   const confidenceRaw = Number(input.confidence);
   let amount = String(input.amount ?? "");
   if (amount && !isValidMonetaryValue(amount)) amount = "";
+  const source_text =
+    typeof input.source_text === "string"
+      ? input.source_text.slice(0, MAX_SOURCE_TEXT_CHARS)
+      : "";
+  const page = typeof input.page === "number" ? input.page : null;
+  const traces = normalizeFieldTraces(input, { source_text, page });
   return {
     description: String(input.description ?? ""),
     quantity: String(input.quantity ?? ""),
     amount,
     related_doctor: String(input.related_doctor ?? ""),
-    source_text:
-      typeof input.source_text === "string"
-        ? input.source_text.slice(0, MAX_SOURCE_TEXT_CHARS)
-        : "",
-    page: typeof input.page === "number" ? input.page : null,
+    source_text,
+    page,
+    ...(traces.length > 0 ? { traces } : {}),
     confidence: Number.isFinite(confidenceRaw)
       ? Math.max(0, Math.min(1, confidenceRaw))
       : 0,
@@ -168,17 +177,21 @@ function normalizeLineItem(input: unknown): ExtractionLineItem | null {
 function normalizeTestResult(input: unknown): ExtractionTestResult | null {
   if (!isObject(input)) return null;
   const confidenceRaw = Number(input.confidence);
+  const source_text =
+    typeof input.source_text === "string"
+      ? input.source_text.slice(0, MAX_SOURCE_TEXT_CHARS)
+      : "";
+  const page = typeof input.page === "number" ? input.page : null;
+  const traces = normalizeFieldTraces(input, { source_text, page });
   return {
     test_category: String(input.test_category ?? ""),
     test_name: String(input.test_name ?? ""),
     result: String(input.result ?? ""),
     unit: String(input.unit ?? ""),
     reference_range: String(input.reference_range ?? ""),
-    source_text:
-      typeof input.source_text === "string"
-        ? input.source_text.slice(0, MAX_SOURCE_TEXT_CHARS)
-        : "",
-    page: typeof input.page === "number" ? input.page : null,
+    source_text,
+    page,
+    ...(traces.length > 0 ? { traces } : {}),
     confidence: Number.isFinite(confidenceRaw)
       ? Math.max(0, Math.min(1, confidenceRaw))
       : 0,
@@ -517,9 +530,7 @@ export function isLlmPostProcessEnabled(): boolean {
 }
 
 export type LlmPostProcessOptions = {
-  preExtracted?: PreExtractedFields;
   filteredPlainText?: string;
-  ocrPageLines?: OcrPageLinesPayload[];
   extractionJobId?: string;
 };
 
@@ -565,8 +576,6 @@ export async function postProcessExtractionWithLlm(
 
       const verified = verifyAndRepairExtraction(outcome.result, {
         filteredPlainText: options?.filteredPlainText ?? rawText,
-        ocrPageLines: options?.ocrPageLines,
-        preExtracted: options?.preExtracted,
       });
       const enriched = await enrichClaimsWithClinicalSynthesis(verified.result);
       if (enriched.stats.fieldsSynthesized > 0) {

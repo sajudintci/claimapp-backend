@@ -1,10 +1,17 @@
 export type FieldValueOrigin = "ocr" | "llm_synthesis";
 
+export type FieldTrace = {
+  source_text: string;
+  page: number | null;
+};
+
 export type TracedField = {
   value: string | number;
   source_text: string;
   page: number | null;
   confidence: number;
+  /** Additional OCR snippets when a value is supported by multiple pages. */
+  traces?: FieldTrace[];
   /** Where the displayed value came from: verbatim OCR extraction vs LLM synthesis from structured fields. */
   value_origin?: FieldValueOrigin;
   /** JSON paths used when value_origin is llm_synthesis (e.g. items[0].description, tests[1].result). */
@@ -19,6 +26,7 @@ export type ExtractionLineItem = {
   source_text: string;
   page: number | null;
   confidence: number;
+  traces?: FieldTrace[];
   field_origins?: Partial<
     Record<"description" | "quantity" | "amount" | "related_doctor", FieldValueOrigin>
   >;
@@ -33,6 +41,7 @@ export type ExtractionTestResult = {
   source_text: string;
   page: number | null;
   confidence: number;
+  traces?: FieldTrace[];
   field_origins?: Partial<
     Record<
       "test_category" | "test_name" | "result" | "unit" | "reference_range",

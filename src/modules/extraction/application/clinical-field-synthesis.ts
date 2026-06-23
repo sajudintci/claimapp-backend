@@ -11,6 +11,7 @@ import {
   LlmExtractionResult,
   TracedField,
 } from "@/modules/extraction/domain/extraction-schema";
+import { tracesFromField } from "@/modules/extraction/domain/field-trace";
 
 const SYNTHESIS_PLACEHOLDER = "{{STRUCTURED_CLAIM_JSON}}";
 const MAX_SYNTHESIS_CONFIDENCE = 0.7;
@@ -198,8 +199,10 @@ function collectOcrSnippets(claim: ExtractionClaim): string[] {
   const snippets = new Set<string>();
   for (const path of SYNTHESIZABLE_TRACED_PATHS) {
     const field = getTracedFieldByPath(claim, path);
-    const text = field.source_text?.trim();
-    if (text) snippets.add(text.slice(0, 200));
+    for (const trace of tracesFromField(field)) {
+      const text = trace.source_text?.trim();
+      if (text) snippets.add(text.slice(0, 200));
+    }
   }
   for (const item of claim.items) {
     if (item.source_text?.trim()) snippets.add(item.source_text.trim().slice(0, 200));

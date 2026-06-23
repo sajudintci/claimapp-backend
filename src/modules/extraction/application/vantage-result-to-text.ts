@@ -1,7 +1,6 @@
 import {
-  OcrPageLinesPayload,
+  LlmPreparedInput,
   preprocessAbbyyOcrJson,
-  PreExtractedFields,
 } from "@/modules/extraction/application/ocr-preprocess";
 import { AbbyyProcessResult } from "@/modules/extraction/infrastructure/abbyy-vantage-client";
 
@@ -11,8 +10,7 @@ export type AbbyyOcrTextResult = {
   ocrFiltered: boolean;
   filteredPlainText?: string;
   filteredCharCount?: number;
-  ocrPageLines?: OcrPageLinesPayload[];
-  preExtracted?: PreExtractedFields;
+  llmPrepared?: LlmPreparedInput;
 };
 
 function normalizePlainText(text: string): string {
@@ -35,8 +33,7 @@ function tryPreprocessJsonBody(body: string): AbbyyOcrTextResult | null {
       ocrFiltered: true,
       filteredPlainText: prepared.filteredPlainText,
       filteredCharCount: prepared.filteredCharCount,
-      ocrPageLines: prepared.ocrPageLines,
-      preExtracted: prepared.preExtracted,
+      llmPrepared: prepared,
     };
   } catch {
     return null;

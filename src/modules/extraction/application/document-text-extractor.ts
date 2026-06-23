@@ -1,8 +1,7 @@
 import { env } from "@/config/env";
 import { logger } from "@/infrastructure/logger/winston";
 import {
-  OcrPageLinesPayload,
-  PreExtractedFields,
+  LlmPreparedInput,
 } from "@/modules/extraction/application/ocr-preprocess";
 import { abbyyResultsToOcrText } from "@/modules/extraction/application/vantage-result-to-text";
 import { processDocumentWithAbbyy } from "@/modules/extraction/infrastructure/abbyy-vantage-client";
@@ -17,8 +16,7 @@ export type TextExtractionResult = {
   ocrFiltered: boolean;
   filteredPlainText?: string;
   filteredCharCount?: number;
-  ocrPageLines?: OcrPageLinesPayload[];
-  preExtracted?: PreExtractedFields;
+  llmPrepared?: LlmPreparedInput;
   abbyyTransactionId?: string;
   abbyySkillId?: string;
   abbyyRawResults?: unknown;
@@ -66,9 +64,6 @@ export async function extractTextFromDocument(
     filteredCharCount: ocrOutput.filteredCharCount ?? meaningfulTextLength(sufficiencySource),
     preview: text.slice(0, 400),
     ocrPageCount: ocrOutput.ocrPageCount,
-    preExtractedFound: ocrOutput.preExtracted
-      ? Object.values(ocrOutput.preExtracted).filter((f) => f.value !== "not_found").length
-      : 0,
   });
 
   return {
@@ -78,8 +73,7 @@ export async function extractTextFromDocument(
     ocrFiltered: ocrOutput.ocrFiltered,
     filteredPlainText: ocrOutput.filteredPlainText,
     filteredCharCount: ocrOutput.filteredCharCount,
-    ocrPageLines: ocrOutput.ocrPageLines,
-    preExtracted: ocrOutput.preExtracted,
+    llmPrepared: ocrOutput.llmPrepared,
     abbyyTransactionId: abbyyResult.transactionId,
     abbyySkillId: abbyyResult.skillId,
     abbyyRawResults: abbyyResult.rawResults.map((file) => ({

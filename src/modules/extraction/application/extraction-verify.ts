@@ -1,17 +1,18 @@
 import { logger } from "@/infrastructure/logger/winston";
 import { computeAggregateConfidence } from "@/modules/extraction/application/extraction-summary";
 import {
-  type OcrPageLinesPayload,
-  type PreExtractedFields,
-} from "@/modules/extraction/application/ocr-preprocess";
-import type { OcrPairPayload } from "@/modules/extraction/application/ocr-layout";
-import {
   ExtractionClaim,
   ExtractionLineItem,
   ExtractionTestResult,
   LlmExtractionResult,
   TracedField,
 } from "@/modules/extraction/domain/extraction-schema";
+import { tracesFromField } from "@/modules/extraction/domain/field-trace";
+import {
+  claimPathToLabelKind,
+  isInvalidExtractedValue,
+  type FieldLabelKind,
+} from "@/modules/extraction/domain/field-label-guard";
 
 const NOT_FOUND: TracedField = {
   value: "not_found",
@@ -22,13 +23,6 @@ const NOT_FOUND: TracedField = {
 
 const INVALID_VALUE_ONLY_PUNCT = /^[.,:;\-—\/\\\s]+$/;
 const DATE_VALUE_RE = /\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}/;
-
-const TOTAL_LABEL =
-  /^(nominal|jumlah|total|grand\s*total|total\s*bayar|jumlah\s*tagihan|amount\s*due|total\s*due)$/i;
-const NAME_LABEL = /^(nama|name|patient|pasien|nama\s*pasien|nama\s*tertanggung)$/i;
-const DOB_LABEL = /^(dob|tanggal\s*lahir|tgl\.?\s*lahir|date\s*of\s*birth)$/i;
-const ADMISSION_LABEL = /^(admission|tgl\.?\s*masuk|tanggal\s*masuk|tgl\s*rawat\s*in)$/i;
-const DISCHARGE_LABEL = /^(discharge|tgl\.?\s*keluar|tanggal\s*keluar|tgl\s*pulang)$/i;
 
 export type ExtractionVerificationStats = {
   ocrVerified: boolean;
@@ -63,27 +57,15 @@ function compactDigits(text: string): string {
   return text.replace(/[^\d]/g, "");
 }
 
-function buildOcrCorpus(plainText: string, pages?: OcrPageLinesPayload[]): string {
-  const parts = [plainText];
-  if (pages) {
-    for (const page of pages) {
-      for (const line of page.lines) parts.push(line.text);
-      for (const row of page.rows) parts.push(row.text);
-      for (const pair of page.pairs) parts.push(pair.text, pair.value, pair.label);
-      for (const table of page.tables) {
-        for (const tr of table.rows) {
-          for (const cell of tr.cells) parts.push(cell.text);
-        }
-      }
-    }
-  }
-  return normalizeForMatch(parts.filter(Boolean).join("\n"));
+function buildOcrCorpus(plainText: string): string {
+  return normalizeForMatch(plainText);
 }
 
 function valueInOcr(
   value: string | number,
   sourceText: string,
   corpusNormalized: string,
+  labelKind?: FieldLabelKind,
 ): boolean {
   if (value === "not_found" || value === "" || value == null) return true;
 
@@ -91,7 +73,12 @@ function valueInOcr(
   const src = normalizeForMatch(sourceText);
   if (!v || INVALID_VALUE_ONLY_PUNCT.test(v)) return false;
 
-  if (src && (src.includes(v) || v.includes(src))) return true;
+  if (labelKind && isInvalidExtractedValue(value, sourceText, labelKind)) return false;
+
+  if (src && (src.includes(v) || v.includes(src))) {
+    if (isInvalidExtractedValue(value, sourceText, labelKind ?? "text")) return false;
+    return true;
+  }
   if (corpusNormalized.includes(v)) return true;
 
   if (src && corpusNormalized.includes(src)) return true;
@@ -123,12 +110,28 @@ function rejectField(field: TracedField): TracedField {
   return { ...NOT_FOUND };
 }
 
+function valueSupportedByField(
+  value: string | number,
+  field: Pick<TracedField, "source_text" | "page" | "traces">,
+  corpus: string,
+  labelKind?: FieldLabelKind,
+): boolean {
+  const traces = tracesFromField(field);
+  if (traces.length === 0) return valueInOcr(value, field.source_text, corpus, labelKind);
+  return traces.some((trace) => valueInOcr(value, trace.source_text, corpus, labelKind));
+}
+
 function verifyTracedField(
   field: TracedField,
   corpus: string,
-  opts: { monetary?: boolean; requireDate?: boolean },
+  opts: { monetary?: boolean; requireDate?: boolean; labelKind?: FieldLabelKind },
 ): TracedField {
   if (field.value === "not_found") return field;
+
+  const kind = opts.labelKind ?? "text";
+  if (isInvalidExtractedValue(field.value, field.source_text, kind)) {
+    return rejectField(field);
+  }
 
   if (opts.monetary && !isValidMonetaryValue(field.value)) {
     return rejectField(field);
@@ -142,67 +145,27 @@ function verifyTracedField(
     return rejectField(field);
   }
 
-  if (!valueInOcr(field.value, field.source_text, corpus)) {
+  if (!valueSupportedByField(field.value, field, corpus, kind)) {
     return rejectField(field);
   }
 
   return field;
 }
 
-function pairToField(pair: OcrPairPayload, page: number): TracedField {
-  return {
-    value: pair.value.trim(),
-    source_text: pair.text,
-    page,
-    confidence: Math.max(0, Math.min(1, pair.confidence)),
-  };
-}
-
-function collectAllPairs(pages?: OcrPageLinesPayload[]): Array<{ page: number; pair: OcrPairPayload }> {
-  const out: Array<{ page: number; pair: OcrPairPayload }> = [];
-  for (const page of pages ?? []) {
-    for (const pair of page.pairs) out.push({ page: page.page, pair });
-  }
-  return out;
-}
-
-function preExtractedToClaimFields(
-  pre: PreExtractedFields,
-): Partial<Record<string, TracedField>> {
-  return {
-    "billing.total_amount_read": pre.totalAmount,
-    "patient.name": pre.patientName,
-    "patient.dob": pre.dob,
-    "encounter.admission_date": pre.admissionDate,
-    "encounter.discharge_date": pre.dischargeDate,
-  };
-}
-
-function applyOcrGroundedField(
-  current: TracedField,
-  ocrField: TracedField,
-  corpus: string,
-): { field: TracedField; repaired: boolean } {
-  if (ocrField.value === "not_found") return { field: current, repaired: false };
-  if (!valueInOcr(ocrField.value, ocrField.source_text, corpus)) {
-    return { field: current, repaired: false };
-  }
-
-  const currentOk =
-    current.value !== "not_found" &&
-    !INVALID_VALUE_ONLY_PUNCT.test(String(current.value)) &&
-    valueInOcr(current.value, current.source_text, corpus);
-
-  if (currentOk) return { field: current, repaired: false };
-
-  return { field: { ...ocrField }, repaired: true };
-}
-
 function verifyLineItem(item: ExtractionLineItem, corpus: string): ExtractionLineItem {
   const description = item.description.trim();
   if (!description) return item;
 
-  if (!valueInOcr(description, item.source_text, corpus)) {
+  if (isInvalidExtractedValue(description, item.source_text, "text")) {
+    return {
+      ...item,
+      description: "",
+      amount: "",
+      confidence: 0,
+    };
+  }
+
+  if (!valueInOcr(description, item.source_text, corpus, "text")) {
     return {
       ...item,
       description: "",
@@ -215,7 +178,11 @@ function verifyLineItem(item: ExtractionLineItem, corpus: string): ExtractionLin
     return { ...item, amount: "" };
   }
 
-  if (item.amount && !valueInOcr(item.amount, item.source_text, corpus)) {
+  if (item.amount && isInvalidExtractedValue(item.amount, item.source_text, "monetary")) {
+    return { ...item, amount: "" };
+  }
+
+  if (item.amount && !valueInOcr(item.amount, item.source_text, corpus, "monetary")) {
     const digits = compactDigits(item.amount);
     if (digits.length < 2 || !compactDigits(corpus).includes(digits)) {
       return { ...item, amount: "" };
@@ -259,45 +226,8 @@ function sumLineItemAmounts(items: ExtractionLineItem[]): string {
 function verifyClaim(
   claim: ExtractionClaim,
   corpus: string,
-  preExtracted?: PreExtractedFields,
-  pages?: OcrPageLinesPayload[],
   stats?: ExtractionVerificationStats,
 ): ExtractionClaim {
-  const pairs = collectAllPairs(pages);
-
-  const pairTotal = pairs
-    .map(({ page, pair }) => ({ page, pair }))
-    .find(({ pair }) => TOTAL_LABEL.test(pair.label) || TOTAL_LABEL.test(pair.key));
-  const pairName = pairs.find(({ pair }) => NAME_LABEL.test(pair.label) || NAME_LABEL.test(pair.key));
-  const pairDob = pairs.find(({ pair }) => DOB_LABEL.test(pair.label) || DOB_LABEL.test(pair.key));
-  const pairAdmission = pairs.find(
-    ({ pair }) => ADMISSION_LABEL.test(pair.label) || ADMISSION_LABEL.test(pair.key),
-  );
-  const pairDischarge = pairs.find(
-    ({ pair }) => DISCHARGE_LABEL.test(pair.label) || DISCHARGE_LABEL.test(pair.key),
-  );
-
-  const ocrCandidates: Record<string, TracedField | undefined> = {};
-
-  if (preExtracted) {
-    Object.assign(ocrCandidates, preExtractedToClaimFields(preExtracted));
-  }
-  if (pairTotal) {
-    ocrCandidates["billing.total_amount_read"] = pairToField(pairTotal.pair, pairTotal.page);
-  }
-  if (pairName) {
-    ocrCandidates["patient.name"] = pairToField(pairName.pair, pairName.page);
-  }
-  if (pairDob) {
-    ocrCandidates["patient.dob"] = pairToField(pairDob.pair, pairDob.page);
-  }
-  if (pairAdmission) {
-    ocrCandidates["encounter.admission_date"] = pairToField(pairAdmission.pair, pairAdmission.page);
-  }
-  if (pairDischarge) {
-    ocrCandidates["encounter.discharge_date"] = pairToField(pairDischarge.pair, pairDischarge.page);
-  }
-
   const track = (path: string, before: TracedField, after: TracedField) => {
     if (!stats) return;
     stats.fieldsChecked++;
@@ -307,17 +237,9 @@ function verifyClaim(
     }
   };
 
-  const applyPath = (path: string, field: TracedField, opts: Parameters<typeof verifyTracedField>[2]) => {
-    let next = verifyTracedField(field, corpus, opts);
-    const ocr = ocrCandidates[path];
-    if (ocr) {
-      const grounded = applyOcrGroundedField(next, ocr, corpus);
-      next = grounded.field;
-      if (grounded.repaired && stats) {
-        stats.fieldsRepairedFromOcr++;
-        stats.repairedPaths.push(path);
-      }
-    }
+  const applyPath = (path: string, field: TracedField, opts: Parameters<typeof verifyTracedField>[2] = {}) => {
+    const labelKind = claimPathToLabelKind(path);
+    const next = verifyTracedField(field, corpus, { ...opts, labelKind });
     track(path, field, next);
     return next;
   };
@@ -366,7 +288,7 @@ function verifyClaim(
     billing,
     patient: {
       patient_id: applyPath("patient.patient_id", claim.patient.patient_id, {}),
-      name: applyPath("patient.name", claim.patient.name, {}),
+      name: applyPath("patient.name", claim.patient.name),
       dob: applyPath("patient.dob", claim.patient.dob, { requireDate: true }),
     },
     encounter: {
@@ -392,16 +314,14 @@ function verifyClaim(
   };
 }
 
-/** OCR-grounded verification: reject LLM values not supported by OCR; repair from pre-extracted/pairs. */
+/** OCR-grounded verification: reject LLM values not supported by OCR text. */
 export function verifyAndRepairExtraction(
   result: LlmExtractionResult,
   options: {
     filteredPlainText: string;
-    ocrPageLines?: OcrPageLinesPayload[];
-    preExtracted?: PreExtractedFields;
   },
 ): VerifiedExtractionResult {
-  const corpus = buildOcrCorpus(options.filteredPlainText, options.ocrPageLines);
+  const corpus = buildOcrCorpus(options.filteredPlainText);
   const stats: ExtractionVerificationStats = {
     ocrVerified: true,
     fieldsChecked: 0,
@@ -411,13 +331,11 @@ export function verifyAndRepairExtraction(
     repairedPaths: [],
   };
 
-  const claims = result.claims.map((claim) =>
-    verifyClaim(claim, corpus, options.preExtracted, options.ocrPageLines, stats),
-  );
+  const claims = result.claims.map((claim) => verifyClaim(claim, corpus, stats));
 
   const confidence = computeAggregateConfidence(claims);
 
-  if (stats.fieldsRejected > 0 || stats.fieldsRepairedFromOcr > 0) {
+  if (stats.fieldsRejected > 0) {
     logger.info("Extraction OCR verification applied", {
       fieldsChecked: stats.fieldsChecked,
       fieldsRejected: stats.fieldsRejected,

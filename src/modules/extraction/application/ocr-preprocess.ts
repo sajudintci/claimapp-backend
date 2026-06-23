@@ -1,24 +1,11 @@
 import { env } from "@/config/env";
-import { TracedField } from "@/modules/extraction/domain/extraction-schema";
-import {
-  buildPairsFromRows,
-  buildRowsFromLines,
-  buildTablesFromAbbyy,
-  flatLinesFromPage,
-  flatRegionsFromPage,
-  renderPagePlainText,
-  type AbbyyBox,
-  type AbbyyTableCellInput,
-  type AbbyyTableInput,
-  type LayoutLineInput,
-  type OcrLinePayload,
-  type OcrPairPayload,
-  type OcrRowPayload,
-  type OcrStructuredPagePayload,
-  type OcrTablePayload,
-} from "@/modules/extraction/application/ocr-layout";
 
-export type { AbbyyBox, OcrLinePayload, OcrRowPayload, OcrPairPayload, OcrTablePayload };
+export type AbbyyBox = {
+  l: number;
+  t: number;
+  r: number;
+  b: number;
+};
 
 export type OcrLine = {
   text: string;
@@ -27,28 +14,31 @@ export type OcrLine = {
   position?: AbbyyBox;
 };
 
+export type OcrTextBlockPayload = {
+  id?: string;
+  text: string;
+  confidence: number;
+  region?: AbbyyBox;
+  source: "text" | "table";
+};
+
+export type OcrPagePayload = {
+  page: number;
+  width?: number;
+  height?: number;
+  rotated?: string;
+  blocks: OcrTextBlockPayload[];
+  tableCount: number;
+};
+
 export type FilteredOcrJson = {
-  pages: OcrStructuredPagePayload[];
+  pages: OcrPagePayload[];
   allLines: OcrLine[];
   plainText: string;
   pageCount: number;
 };
 
-export type PreExtractedFieldKey =
-  | "policyNumber"
-  | "claimNumber"
-  | "patientName"
-  | "dob"
-  | "admissionDate"
-  | "dischargeDate"
-  | "totalAmount";
-
-export type PreExtractedFields = Record<PreExtractedFieldKey, TracedField>;
-
-/** Stored on extraction payload (schema v3). */
-export type OcrPageLinesPayload = OcrStructuredPagePayload;
-
-export const OCR_LAYOUT_SCHEMA_VERSION = 3;
+export const OCR_FORMAT_SCHEMA_VERSION = 4;
 
 export type LlmPreparedInput = {
   ocrText: string;
@@ -56,35 +46,16 @@ export type LlmPreparedInput = {
   ocrCharCount: number;
   filteredCharCount: number;
   pageCount: number;
-  ocrPageLines: OcrPageLinesPayload[];
-  preExtracted: PreExtractedFields;
+  pages: OcrPagePayload[];
   chunks: Array<{ page: number; text: string }>;
 };
 
-const NOT_FOUND: TracedField = {
-  value: "not_found",
-  source_text: "",
-  page: null,
-  confidence: 0,
-};
-
-export const PRE_EXTRACTED_FIELD_KEYS: PreExtractedFieldKey[] = [
-  "policyNumber",
-  "claimNumber",
-  "patientName",
-  "dob",
-  "admissionDate",
-  "dischargeDate",
-  "totalAmount",
-];
-
 type AbbyyPosition = { l?: number; t?: number; r?: number; b?: number };
 type AbbyyLine = { text?: string; confidence?: number; position?: AbbyyPosition };
-type AbbyyTextBlock = { lines?: AbbyyLine[] };
+type AbbyyTextBlock = { id?: string; lines?: AbbyyLine[] };
 type AbbyyCell = {
   lines?: AbbyyLine[];
   position?: AbbyyPosition;
-  colRowPosition?: { l?: number; t?: number; r?: number; b?: number };
 };
 type AbbyyTable = { position?: AbbyyPosition; cells?: AbbyyCell[] };
 type AbbyyPage = {
@@ -98,6 +69,9 @@ type AbbyyPage = {
 type AbbyyOcrJson = {
   layout?: { pages?: AbbyyPage[] };
 };
+
+const ROW_Y_TOLERANCE_PX = 20;
+const COLUMN_GAP_PX = 60;
 
 function normalizeLineText(text: string): string {
   return text
@@ -124,22 +98,39 @@ export function parseAbbyyPosition(pos?: AbbyyPosition): AbbyyBox | undefined {
   return { l, t, r, b };
 }
 
-function collectLinesFromPage(page: AbbyyPage, pageNumber: number): OcrLine[] {
-  const out: OcrLine[] = [];
+function centerY(box: AbbyyBox): number {
+  return (box.t + box.b) / 2;
+}
 
-  const pushLine = (line: AbbyyLine, source: "text" | "table") => {
+function horizontalGap(a: AbbyyBox, b: AbbyyBox): number {
+  if (b.l >= a.r) return b.l - a.r;
+  if (a.l >= b.r) return a.l - b.r;
+  return 0;
+}
+
+function collectBlocksFromPage(page: AbbyyPage, pageNumber: number): OcrTextBlockPayload[] {
+  const blocks: OcrTextBlockPayload[] = [];
+
+  const pushLine = (
+    line: AbbyyLine,
+    source: "text" | "table",
+    blockId?: string,
+  ) => {
     const text = normalizeLineText(String(line.text ?? ""));
     if (text.length < 2) return;
-    out.push({
+    blocks.push({
+      id: blockId,
       text,
-      page: pageNumber,
       confidence: normalizeConfidence(line.confidence),
-      position: parseAbbyyPosition(line.position),
+      region: parseAbbyyPosition(line.position),
+      source,
     });
   };
 
   for (const block of page.texts ?? []) {
-    for (const line of block.lines ?? []) pushLine(line, "text");
+    for (const line of block.lines ?? []) {
+      pushLine(line, "text", block.id);
+    }
   }
 
   for (const table of page.tables ?? []) {
@@ -148,7 +139,22 @@ function collectLinesFromPage(page: AbbyyPage, pageNumber: number): OcrLine[] {
     }
   }
 
-  return out;
+  blocks.sort(
+    (a, b) =>
+      (a.region?.t ?? 0) - (b.region?.t ?? 0) ||
+      (a.region?.l ?? 0) - (b.region?.l ?? 0),
+  );
+
+  return blocks;
+}
+
+function collectLinesFromBlocks(blocks: OcrTextBlockPayload[], pageNumber: number): OcrLine[] {
+  return blocks.map((block) => ({
+    text: block.text,
+    page: pageNumber,
+    confidence: block.confidence,
+    position: block.region,
+  }));
 }
 
 function dedupeAdjacentLines(lines: OcrLine[]): OcrLine[] {
@@ -161,79 +167,108 @@ function dedupeAdjacentLines(lines: OcrLine[]): OcrLine[] {
   return result;
 }
 
-function toLayoutLines(
-  pageLines: OcrLine[],
-  tableOnlyTexts: Set<string>,
-): LayoutLineInput[] {
-  return pageLines.map((l) => ({
-    text: l.text,
-    confidence: l.confidence,
-    position: l.position,
-    source: tableOnlyTexts.has(l.text) ? "table" : "text",
-  }));
+function groupBlocksIntoVisualRows(blocks: OcrTextBlockPayload[]): string[] {
+  const withBox = blocks.filter((block) => block.region);
+  if (withBox.length === 0) {
+    return blocks.map((block) => block.text).filter(Boolean);
+  }
+
+  const sorted = [...withBox].sort(
+    (a, b) =>
+      centerY(a.region!) - centerY(b.region!) ||
+      a.region!.l - b.region!.l,
+  );
+
+  const rows: OcrTextBlockPayload[][] = [];
+  for (const block of sorted) {
+    const box = block.region!;
+    let placed = false;
+    for (const row of rows) {
+      const ref = row[0]!.region!;
+      if (Math.abs(centerY(ref) - centerY(box)) <= ROW_Y_TOLERANCE_PX) {
+        row.push(block);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) rows.push([block]);
+  }
+
+  return rows.map((row) => {
+    row.sort((a, b) => (a.region?.l ?? 0) - (b.region?.l ?? 0));
+    const parts: string[] = [];
+    for (let i = 0; i < row.length; i++) {
+      const current = row[i]!;
+      if (i === 0) {
+        parts.push(current.text);
+        continue;
+      }
+      const prev = row[i - 1]!;
+      const gap =
+        prev.region && current.region
+          ? horizontalGap(prev.region, current.region)
+          : 0;
+      const separator = gap >= COLUMN_GAP_PX ? " || " : " ";
+      parts.push(`${separator}${current.text}`);
+    }
+    return parts.join("");
+  });
 }
 
-function mapAbbyyTables(tables: AbbyyTable[]): AbbyyTableInput[] {
-  return tables.map((table) => ({
-    position: parseAbbyyPosition(table.position),
-    cells: (table.cells ?? []).map(
-      (cell): AbbyyTableCellInput => ({
-        position: parseAbbyyPosition(cell.position),
-        colRowPosition: cell.colRowPosition,
-        lines: (cell.lines ?? []).map((line) => ({
-          text: line.text,
-          confidence: line.confidence,
-          position: parseAbbyyPosition(line.position),
-        })),
-      }),
-    ),
-  }));
-}
+function renderStructuredBlocks(pages: OcrPagePayload[]): string {
+  const lines: string[] = [];
 
-function buildStructuredPage(
-  page: AbbyyPage,
-  pageNumber: number,
-  pageLines: OcrLine[],
-): OcrStructuredPagePayload {
-  const pageWidth = Number(page.width);
-  const pageHeight = Number(page.height);
+  for (const page of pages) {
+    lines.push(`--- Page ${page.page} ---`);
+    if (page.width && page.height) {
+      lines.push(`page_dimensions: width=${page.width}, height=${page.height}`);
+    }
+    if (page.tableCount > 0) {
+      lines.push(`tables: ${page.tableCount}`);
+    }
 
-  const tableTexts = new Set<string>();
-  for (const table of page.tables ?? []) {
-    for (const cell of table.cells ?? []) {
-      for (const line of cell.lines ?? []) {
-        const t = normalizeLineText(String(line.text ?? ""));
-        if (t.length >= 2) tableTexts.add(t);
+    for (const block of page.blocks) {
+      const idPrefix = block.id ? `${block.id.slice(0, 8)} ` : "";
+      if (block.region) {
+        const { l, r, t, b } = block.region;
+        lines.push(
+          `[${idPrefix}x:${l}-${r}, y:${t}-${b}] "${block.text}" (confidence=${block.confidence.toFixed(2)}, source=${block.source})`,
+        );
+      } else {
+        lines.push(`[${idPrefix}] "${block.text}" (confidence=${block.confidence.toFixed(2)})`);
       }
     }
   }
 
-  const layoutInputs = toLayoutLines(pageLines, tableTexts);
-  const linePayloads: OcrLinePayload[] = layoutInputs.map((l) => ({
-    text: l.text,
-    confidence: l.confidence,
-    region: l.position,
-    source: l.source,
-  }));
+  return lines.join("\n");
+}
 
-  const rows = buildRowsFromLines(layoutInputs);
-  const pairs = buildPairsFromRows(rows);
-  const tables = buildTablesFromAbbyy(mapAbbyyTables(page.tables ?? []));
+export function renderPagePlainText(page: OcrPagePayload): string {
+  const lines: string[] = [`--- Page ${page.page} ---`];
+  lines.push(...groupBlocksIntoVisualRows(page.blocks));
 
-  const structured: OcrStructuredPagePayload = {
+  const tableBlocks = page.blocks.filter((block) => block.source === "table");
+  if (tableBlocks.length > 0) {
+    lines.push("[TABLE]");
+    lines.push(tableBlocks.map((block) => block.text).join(" | "));
+  }
+
+  return lines.join("\n");
+}
+
+function buildPagePayload(page: AbbyyPage, pageNumber: number): OcrPagePayload {
+  const pageWidth = Number(page.width);
+  const pageHeight = Number(page.height);
+  const blocks = collectBlocksFromPage(page, pageNumber);
+
+  return {
     page: pageNumber,
     width: Number.isFinite(pageWidth) && pageWidth > 0 ? pageWidth : undefined,
     height: Number.isFinite(pageHeight) && pageHeight > 0 ? pageHeight : undefined,
     rotated: page.rotated,
-    lines: linePayloads,
-    rows,
-    pairs,
-    tables,
-    linesFlat: flatLinesFromPage({ rows, lines: linePayloads }),
-    regions: flatRegionsFromPage({ rows, lines: linePayloads }),
+    blocks,
+    tableCount: page.tables?.length ?? 0,
   };
-
-  return structured;
 }
 
 function isAbbyyLayoutJson(input: unknown): input is AbbyyOcrJson {
@@ -249,16 +284,16 @@ export function filterOcrJson(input: unknown): FilteredOcrJson {
 
   const pages = input.layout!.pages!;
   const allLines: OcrLine[] = [];
-  const structuredPages: OcrStructuredPagePayload[] = [];
+  const structuredPages: OcrPagePayload[] = [];
 
   pages.forEach((page, index) => {
     const pageNumber = index + 1;
-    const pageLines = dedupeAdjacentLines(collectLinesFromPage(page, pageNumber));
-    allLines.push(...pageLines);
-    structuredPages.push(buildStructuredPage(page, pageNumber, pageLines));
+    const pagePayload = buildPagePayload(page, pageNumber);
+    structuredPages.push(pagePayload);
+    allLines.push(...dedupeAdjacentLines(collectLinesFromBlocks(pagePayload.blocks, pageNumber)));
   });
 
-  const plainText = structuredPages.map((p) => renderPagePlainText(p)).join("\n\n");
+  const plainText = structuredPages.map((page) => renderPagePlainText(page)).join("\n\n");
 
   return {
     pages: structuredPages,
@@ -268,213 +303,31 @@ export function filterOcrJson(input: unknown): FilteredOcrJson {
   };
 }
 
-type FieldPattern = {
-  key: PreExtractedFieldKey;
-  patterns: RegExp[];
-};
-
-const FIELD_PATTERNS: FieldPattern[] = [
-  {
-    key: "policyNumber",
-    patterns: [
-      /(?:policy\s*(?:no|number|#)|no\.?\s*polis|polis)\s*[:\-]?\s*([A-Z0-9\-\/]+)/i,
-    ],
-  },
-  {
-    key: "claimNumber",
-    patterns: [
-      /(?:claim\s*(?:no|number|#)|no\.?\s*klaim|klaim\s*no)\s*[:\-]?\s*([A-Z0-9\-\/]+)/i,
-    ],
-  },
-  {
-    key: "patientName",
-    patterns: [
-      /(?:patient\s*name|nama\s*pasien|nama\s*tertanggung|insured\s*name)\s*[:\-]?\s*([^\n\r|]{2,120})/i,
-      /(?:^|\|)\s*nama\s*(?:pasien|tertanggung)?\s*[:\-]?\s*([A-Za-z][^\n\r|]{1,80})/i,
-    ],
-  },
-  {
-    key: "dob",
-    patterns: [
-      /(?:dob|date\s*of\s*birth|tanggal\s*lahir|tgl\.?\s*lahir)\s*[:\-]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})/i,
-    ],
-  },
-  {
-    key: "admissionDate",
-    patterns: [
-      /(?:admission\s*date|tgl\.?\s*masuk|tanggal\s*masuk|tgl\s*rawat\s*in)\s*[:\-]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})/i,
-    ],
-  },
-  {
-    key: "dischargeDate",
-    patterns: [
-      /(?:discharge\s*date|tgl\.?\s*keluar|tanggal\s*keluar|tgl\s*pulang)\s*[:\-]?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})/i,
-    ],
-  },
-  {
-    key: "totalAmount",
-    patterns: [
-      /(?:total(?:\s*amount)?|grand\s*total|jumlah|total\s*tagihan|total\s*bayar|nominal)\s*[:\-]?\s*(?:Rp\.?\s*)?([\d.,]+)/i,
-    ],
-  },
-];
-
-const TOTAL_AMOUNT_LABEL =
-  /^(nominal|jumlah|total|grand\s*total|total\s*bayar|jumlah\s*tagihan|amount\s*due|total\s*due)$/i;
-
-function extractTotalFromPairs(pages: OcrStructuredPagePayload[]): TracedField | null {
-  let best: TracedField | null = null;
-
-  for (const page of pages) {
-    for (const pair of page.pairs) {
-      const label = pair.label.trim();
-      const value = pair.value.trim();
-      if (!value || !/\d/.test(value)) continue;
-      if (!TOTAL_AMOUNT_LABEL.test(label) && !TOTAL_AMOUNT_LABEL.test(pair.key)) continue;
-
-      const hit: TracedField = {
-        value,
-        source_text: pair.text,
-        page: page.page,
-        confidence: pair.confidence,
-      };
-      if (!best || hit.confidence > best.confidence) best = hit;
-    }
-  }
-
-  return best;
-}
-
-function extractFromText(
-  text: string,
-  page: number,
-  confidence: number,
-  pattern: FieldPattern,
-): TracedField | null {
-  for (const re of pattern.patterns) {
-    const match = text.match(re);
-    if (!match?.[1]) continue;
-    const value = match[1].trim();
-    if (!value) continue;
-    if (pattern.key === "totalAmount" && !/\d/.test(value)) continue;
-    return {
-      value,
-      source_text: text,
-      page,
-      confidence,
-    };
-  }
-  return null;
-}
-
-function extractFromLine(line: OcrLine, pattern: FieldPattern): TracedField | null {
-  return extractFromText(line.text, line.page, line.confidence, pattern);
-}
-
-export function extractFields(filtered: FilteredOcrJson): PreExtractedFields {
-  const result = {} as PreExtractedFields;
-
-  for (const key of PRE_EXTRACTED_FIELD_KEYS) {
-    result[key] = { ...NOT_FOUND };
-  }
-
-  for (const pattern of FIELD_PATTERNS) {
-    let best: TracedField | null = null;
-
-    if (pattern.key === "totalAmount") {
-      best = extractTotalFromPairs(filtered.pages);
-    }
-
-    for (const line of filtered.allLines) {
-      const hit = extractFromLine(line, pattern);
-      if (!hit) continue;
-      if (!best || hit.confidence > best.confidence) best = hit;
-    }
-
-    for (const page of filtered.pages) {
-      for (const row of page.rows) {
-        const hit = extractFromText(row.text, page.page, row.confidence, pattern);
-        if (!hit) continue;
-        if (!best || hit.confidence > best.confidence) best = hit;
-      }
-      for (const pair of page.pairs) {
-        const hit = extractFromText(pair.text, page.page, pair.confidence, pattern);
-        if (!hit) continue;
-        if (!best || hit.confidence > best.confidence) best = hit;
-      }
-    }
-
-    if (best) result[pattern.key] = best;
-  }
-
-  return result;
-}
-
-function valueInSource(value: string | number, sourceText: string): boolean {
-  if (value === "not_found") return true;
-  const v = String(value).trim();
-  if (!v || !sourceText) return false;
-  return sourceText.includes(v);
-}
-
-export function validateOutput(fields: PreExtractedFields): PreExtractedFields {
-  const validated = {} as PreExtractedFields;
-
-  for (const key of PRE_EXTRACTED_FIELD_KEYS) {
-    const field = fields[key];
-    if (
-      field.value === "not_found" ||
-      (field.source_text && valueInSource(field.value, field.source_text))
-    ) {
-      validated[key] = field;
-      continue;
-    }
-    validated[key] = { ...NOT_FOUND };
-  }
-
-  return validated;
-}
-
 export function prepareForLLM(
   filtered: FilteredOcrJson,
-  preExtracted: PreExtractedFields,
   maxChars = env.LLM_OCR_MAX_CHARS,
 ): LlmPreparedInput {
-  const chunks = filtered.pages.map((p) => ({
-    page: p.page,
-    text: renderPagePlainText(p),
+  const chunks = filtered.pages.map((page) => ({
+    page: page.page,
+    text: renderPagePlainText(page),
   }));
 
-  let ocrBody = filtered.plainText;
-  if (ocrBody.length > maxChars) {
-    ocrBody = ocrBody.slice(0, maxChars);
+  const structuredBlocks = renderStructuredBlocks(filtered.pages);
+  const structuredCap = Math.max(4000, Math.floor(maxChars * 0.75));
+  const structuredSection = structuredBlocks.slice(0, structuredCap);
+
+  let plainBody = filtered.plainText;
+  const remaining = Math.max(0, maxChars - structuredSection.length - 200);
+  if (plainBody.length > remaining) {
+    plainBody = plainBody.slice(0, remaining);
   }
 
-  const hints = PRE_EXTRACTED_FIELD_KEYS.map((key) => {
-    const f = preExtracted[key];
-    if (f.value === "not_found") return `${key}: not_found`;
-    return `${key}: ${f.value} (page ${f.page}, source: "${f.source_text.slice(0, 120)}")`;
-  }).join("\n");
-
-  const layoutPairs = filtered.pages
-    .flatMap((p) =>
-      p.pairs
-        .filter((pair) => pair.value.trim().length > 0)
-        .map((pair) => `page ${p.page}: ${pair.text}`),
-    )
-    .slice(0, 80)
-    .join("\n");
-
   const ocrText = [
-    "=== PRE-EXTRACTED KEY FIELDS (verify against OCR; do not invent) ===",
-    hints,
+    "=== STRUCTURED OCR BLOCKS (position + text, top to bottom) ===",
+    structuredSection,
     "",
-    layoutPairs.length > 0
-      ? "=== LAYOUT PAIRS (label : value from OCR position) ===\n" + layoutPairs
-      : "",
-    "",
-    "=== FILTERED OCR TEXT (rows + tables, by page) ===",
-    ocrBody,
+    "=== FILTERED OCR TEXT (visual rows by page) ===",
+    plainBody,
   ].join("\n");
 
   const filteredCharCount = filtered.plainText.replace(/\s+/g, "").length;
@@ -485,8 +338,7 @@ export function prepareForLLM(
     ocrCharCount: ocrText.replace(/\s+/g, "").length,
     filteredCharCount,
     pageCount: filtered.pageCount,
-    ocrPageLines: filtered.pages,
-    preExtracted,
+    pages: filtered.pages,
     chunks,
   };
 }
@@ -500,7 +352,5 @@ export function preprocessAbbyyOcrJson(
     return null;
   }
 
-  const extracted = extractFields(filtered);
-  const validated = validateOutput(extracted);
-  return prepareForLLM(filtered, validated, maxChars);
+  return prepareForLLM(filtered, maxChars);
 }

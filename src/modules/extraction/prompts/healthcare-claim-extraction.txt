@@ -75,20 +75,14 @@ Supporting document information
 
 === OCR INPUT YOU RECEIVE ===
 
-The user message contains two blocks:
+The user message contains two OCR blocks:
 
-1) PRE-EXTRACTED KEY FIELDS — regex hints from ABBYY layout (rows/pairs/tables). VERIFY each hint against block (2). If the hint appears in OCR text, prefer it for the mapped claim field.
+1) STRUCTURED OCR BLOCKS — each OCR line with x/y coordinates, confidence, and source (text/table).
+   - Use coordinates to distinguish columns on the same visual row.
+   - Blocks far apart horizontally (different x ranges) are separate form columns.
 
-Field mapping from hints:
-- policyNumber → (use in patient_id or notes only if clearly a policy id in OCR; do not invent a schema field if absent)
-- claimNumber → patient_id ONLY if OCR explicitly labels it as claim/klaim number
-- patientName → patient.name
-- dob → patient.dob
-- admissionDate → encounter.admission_date
-- dischargeDate → encounter.discharge_date
-- totalAmount → billing.total_amount_read (invoice grand total / nominal / jumlah tagihan)
-
-2) FILTERED OCR TEXT — pages as "--- Page N ---", visual rows, then [TABLE] rows (pipe-separated cells).
+2) FILTERED OCR TEXT — pages as "--- Page N ---", visual rows (wide column gaps shown as " || "), then [TABLE] rows.
+   - Use as supporting raw context when structured blocks are unclear.
 
 Common Indonesian / English invoice labels:
 Nominal, Jumlah, Jumlah Tagihan, Total, Grand Total, Total Bayar, Sub Total, Amount Due, Total Due, Biaya, Tagihan.
@@ -103,10 +97,19 @@ B) Stacked rows (very common): row 1 = label only ("Nominal", "Nama", "Jumlah"),
 
 C) Table cells: amount may be in the rightmost column on the same table row as the label.
 
+D) Multi-column forms (same visual row, two or more fields):
+   Example: "Nama Pasien:          No Pegawai:" on one row with empty or filled values below each column.
+   → Each column is a SEPARATE field. NEVER use the right column's label ("No Pegawai") as the value for the left column ("Nama Pasien").
+   → If a column has only a printed label and no filled value (blank after ":" or on the next line in that column), use "not_found" for that field.
+   → Match values to labels by horizontal position (same column), not by reading left-to-right across the whole row as one label:value pair.
+
 VALUE RULES (all fields):
 
 - value MUST be copied from OCR (digits, names, dates). Never use punctuation-only tokens as value.
-- FORBIDDEN as value: ".", ",", ":", "-", "—", "/", "No", "No.", empty string, or the label word itself (e.g. value "Nominal" when the amount is on the next line).
+- FORBIDDEN as value: ".", ",", ":", "-", "—", "/", "No", "No.", empty string, or any printed LABEL WORD from the same field (never use part of the label as the value).
+- Compound labels are ONE label: "Nama Pasien", "Jumlah Tagihan", "Grand Total", "Tanggal Lahir" — do not split them into label + value on the same line.
+- Stacked layout: row 1 = label only, row 2 = value on the NEXT line. If row 2 is missing or unreadable → "not_found".
+- FORBIDDEN label tokens (never use as value): Nama, Pasien, Patient, Nominal, Jumlah, Total, Tagihan, Bayar, Tanggal, Tgl, Lahir, Masuk, Keluar, Polis, Klaim, Diagnosis, ICD.
 - If you cannot find a real value in OCR, use "not_found" with confidence 0.
 
 POST-PROCESSING (automatic):
@@ -125,8 +128,12 @@ MONETARY FIELDS (billing.total_amount_read, billing.tax_amount, billing.total_am
 PATIENT NAME:
 
 - Use explicit labels: Nama Pasien, Nama, Patient Name, Nama Tertanggung.
+- "Nama Pasien" is ONE complete label (two words) — never use "Pasien" alone as patient.name.
 - Do not use hospital name, doctor name, or address as patient.name.
-- Stacked "Nama" + next line = patient name on the next line.
+- Stacked layout: row 1 = full label only ("Nama Pasien", "Nama", "Patient Name"); row 2 = the actual name on the next line.
+- Same-row layout: "Nama Pasien : Budi Santoso" → value is after the colon, not part of the label.
+- FORBIDDEN as patient.name value: "Nama", "Pasien", "Patient", "Name", "Tertanggung", or any single word from the label line.
+- If only the printed label appears in OCR with no filled-in name on the next line or after ":", use "not_found".
 
 EVERY extracted field MUST contain:
 
@@ -134,12 +141,24 @@ value
 source_text
 page
 confidence
+traces (optional array when value is supported by multiple OCR pages)
 
 source_text:
 
 must contain exact supporting OCR snippet
 do not paraphrase
 do not summarize
+
+traces (optional):
+
+use when the SAME field value is supported by OCR snippets on MORE THAN ONE page
+each entry: { "source_text": "...", "page": N }
+include the primary source_text/page as the first trace when using traces
+max 8 traces per field
+
+If OCR page metadata exists:
+
+include page number
 
 Confidence range:
 0.00 - 1.00

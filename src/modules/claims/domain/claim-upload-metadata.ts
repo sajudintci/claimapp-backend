@@ -16,13 +16,43 @@ export function parseClaimUploadMetadata(body: Record<string, unknown>): ClaimUp
   };
 }
 
-export function hasUploadMetadata(metadata: ClaimUploadMetadata): boolean {
-  return Boolean(
-    metadata.patientName ||
-      metadata.documentType.length > 0 ||
-      metadata.priority ||
-      metadata.notes,
-  );
+const VALID_PRIORITIES = new Set(["Normal", "High", "Urgent"]);
+
+export type ClaimUploadMetadataValidationError = {
+  field: string;
+  message: string;
+};
+
+export function validateClaimUploadInput(input: {
+  claimNumber?: unknown;
+  reviewerId?: unknown;
+  metadata: ClaimUploadMetadata;
+}): ClaimUploadMetadataValidationError[] {
+  const errors: ClaimUploadMetadataValidationError[] = [];
+
+  const claimNumber = typeof input.claimNumber === "string" ? input.claimNumber.trim() : "";
+  if (!claimNumber) {
+    errors.push({ field: "claimNumber", message: "Claim reference is required" });
+  }
+
+  if (!input.metadata.patientName) {
+    errors.push({ field: "patientName", message: "Patient name is required" });
+  }
+
+  if (input.metadata.documentType.length === 0) {
+    errors.push({ field: "documentType", message: "Document type is required" });
+  }
+
+  if (!input.metadata.priority || !VALID_PRIORITIES.has(input.metadata.priority)) {
+    errors.push({ field: "priority", message: "Priority is required" });
+  }
+
+  const reviewerId = typeof input.reviewerId === "string" ? input.reviewerId.trim() : "";
+  if (!reviewerId) {
+    errors.push({ field: "reviewerId", message: "Reviewer assignment is required" });
+  }
+
+  return errors;
 }
 
 function readOptionalString(value: unknown): string | null {

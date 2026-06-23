@@ -17,6 +17,7 @@ import {
   postProcessExtractionWithLlm,
 } from "@/modules/extraction/application/llm-post-process";
 import { updateExtractionJobProgress } from "@/modules/extraction/application/extraction-job-progress";
+import { saveOcrPreprocessHistory } from "@/modules/extraction/application/ocr-preprocess-history.service";
 import { createId } from "@/utils/id";
 import {
   assertSufficientOcrCredits,
@@ -136,6 +137,15 @@ export const initExtractionQueue = async () => {
         extracted,
       );
 
+      if (extracted.llmPrepared) {
+        await saveOcrPreprocessHistory({
+          claimId: job.data.claimId,
+          extractionJobId: job.data.extractionJobId,
+          source: extracted.source,
+          prepared: extracted.llmPrepared,
+        });
+      }
+
       await updateExtractionJobProgress(job.data.extractionJobId, "llm");
 
       const ocrCreditsRequired = creditsFromPageCount(extracted.ocrPageCount);
@@ -149,9 +159,7 @@ export const initExtractionQueue = async () => {
 
       let llmOutcome = ocrSufficient
         ? await postProcessExtractionWithLlm(extracted.text, {
-            preExtracted: extracted.preExtracted,
             filteredPlainText: extracted.filteredPlainText ?? extracted.text,
-            ocrPageLines: extracted.ocrPageLines,
             extractionJobId: job.data.extractionJobId,
           })
         : {
@@ -193,8 +201,6 @@ export const initExtractionQueue = async () => {
         ocrSufficient,
         ocrFiltered: extracted.ocrFiltered,
         ocrPageCount: extracted.ocrPageCount ?? null,
-        ocrPageLines: extracted.ocrPageLines ?? null,
-        preExtractedFields: extracted.preExtracted ?? null,
         abbyyTransactionId: extracted.abbyyTransactionId ?? null,
         abbyySkillId: extracted.abbyySkillId ?? null,
         abbyyRawResults: extracted.abbyyRawResults ?? null,
@@ -213,7 +219,7 @@ export const initExtractionQueue = async () => {
         llmError: llmOutcome.error,
         llmAttempts: llmOutcome.attempts,
         extractionVerification: llmOutcome.verification ?? null,
-        schemaVersion: 3,
+        schemaVersion: 4,
       };
 
       const nextStatus = resolveClaimStatus({

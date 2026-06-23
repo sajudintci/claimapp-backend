@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  hasUploadMetadata,
   parseClaimUploadMetadata,
+  validateClaimUploadInput,
 } from "@/modules/claims/domain/claim-upload-metadata";
 
 describe("claim-upload-metadata", () => {
@@ -50,14 +50,41 @@ describe("claim-upload-metadata", () => {
     });
   });
 
-  it("detects when metadata has at least one value", () => {
+  it("requires all metadata fields except notes", () => {
+    const metadata = parseClaimUploadMetadata({
+      patientName: "Budi",
+      documentType: "Inpatient Claim",
+      priority: "High",
+    });
+
     expect(
-      hasUploadMetadata({
-        patientName: null,
-        documentType: ["Outpatient Claim"],
-        priority: null,
-        notes: null,
+      validateClaimUploadInput({
+        claimNumber: "CLM-2026-0001",
+        reviewerId: "rev-1",
+        metadata,
       }),
-    ).toBe(true);
+    ).toEqual([]);
+
+    expect(
+      validateClaimUploadInput({
+        claimNumber: "",
+        reviewerId: "",
+        metadata: parseClaimUploadMetadata({}),
+      }).map((error) => error.field),
+    ).toEqual(["claimNumber", "patientName", "documentType", "priority", "reviewerId"]);
+  });
+
+  it("allows notes to be omitted", () => {
+    const errors = validateClaimUploadInput({
+      claimNumber: "CLM-2026-0001",
+      reviewerId: "rev-1",
+      metadata: parseClaimUploadMetadata({
+        patientName: "Budi",
+        documentType: "Outpatient Claim",
+        priority: "Normal",
+      }),
+    });
+
+    expect(errors).toEqual([]);
   });
 });

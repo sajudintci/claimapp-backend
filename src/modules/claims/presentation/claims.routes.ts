@@ -15,8 +15,15 @@ import { ExtractionJobModel } from "@/database/models/extraction-job.model";
 import { ExtractionResultModel } from "@/database/models/extraction-result.model";
 import { UserModel } from "@/database/models/user.model";
 import { mapExtractionJobDto } from "@/modules/extraction/application/extraction-job-mapper";
+import {
+  getOcrPreprocessHistoryForClaim,
+  listOcrPreprocessHistoriesForClaim,
+} from "@/modules/extraction/application/ocr-preprocess-history.service";
 import { parseClaimReviewMeta } from "@/modules/claims/domain/claim-review-result";
-import { parseClaimUploadMetadata } from "@/modules/claims/domain/claim-upload-metadata";
+import {
+  parseClaimUploadMetadata,
+  validateClaimUploadInput,
+} from "@/modules/claims/domain/claim-upload-metadata";
 import { AuditAction } from "@/modules/audit/domain/audit-actions";
 import { writeAuditFromRequest } from "@/utils/audit-request";
 
@@ -183,12 +190,25 @@ router.post("/upload", upload.single("document"), async (req, res) => {
         : null;
 
     const uploadMetadata = parseClaimUploadMetadata(req.body as Record<string, unknown>);
+    const validationErrors = validateClaimUploadInput({
+      claimNumber: req.body.claimNumber,
+      reviewerId,
+      metadata: uploadMetadata,
+    });
+    if (validationErrors.length > 0) {
+      return res.fail({
+        status: 400,
+        code: "VALIDATION_ERROR",
+        message: "Upload metadata is incomplete",
+        error: { type: "ValidationError", details: validationErrors },
+      });
+    }
 
     const data = await claimsService.uploadClaim({
       organizationId: req.auth!.org,
       createdBy: req.auth!.sub,
-      claimNumber: req.body.claimNumber ?? `CLM-${Date.now()}`,
-      reviewerId,
+      claimNumber: String(req.body.claimNumber).trim(),
+      reviewerId: reviewerId!,
       metadata: uploadMetadata,
       file: req.file,
     });
@@ -253,6 +273,53 @@ router.get("/:claimId/extraction-status", async (req, res) => {
     });
   }
   return res.success(mapExtractionJobDto(job));
+});
+
+router.get("/:claimId/ocr-preprocess-histories", async (req, res) => {
+  const org = req.auth?.org;
+  if (!org) {
+    return res.fail({
+      status: 401,
+      code: "UNAUTHORIZED",
+      message: "Organization context is required",
+    });
+  }
+
+  const items = await listOcrPreprocessHistoriesForClaim({
+    claimId: req.params.claimId,
+    organizationId: org,
+    limit: 50,
+  });
+
+  return res.success({ items });
+});
+
+router.get("/:claimId/ocr-preprocess-histories/:historyId", async (req, res) => {
+  const org = req.auth?.org;
+  if (!org) {
+    return res.fail({
+      status: 401,
+      code: "UNAUTHORIZED",
+      message: "Organization context is required",
+    });
+  }
+
+  const item = await getOcrPreprocessHistoryForClaim({
+    claimId: req.params.claimId,
+    historyId: req.params.historyId,
+    organizationId: org,
+  });
+
+  if (!item) {
+    return res.fail({
+      status: 404,
+      code: "OCR_PREPROCESS_HISTORY_NOT_FOUND",
+      message: "OCR preprocess history not found",
+      error: { type: "NotFoundError" },
+    });
+  }
+
+  return res.success(item);
 });
 
 router.post("/:claimId/extraction/retry", async (req, res) => {

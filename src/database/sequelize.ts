@@ -12,6 +12,7 @@ import { ClaimModel } from "./models/claim.model";
 import { ClaimDocumentModel } from "./models/claim-document.model";
 import { ExtractionJobModel } from "./models/extraction-job.model";
 import { ExtractionResultModel } from "./models/extraction-result.model";
+import { OcrPreprocessHistoryModel } from "./models/ocr-preprocess-history.model";
 import { AuditLogModel } from "./models/audit-log.model";
 import { RefreshTokenModel } from "./models/refresh-token.model";
 import { NotificationModel } from "./models/notification.model";
@@ -24,6 +25,7 @@ import { ensureOutboxSchema } from "./migrations/ensure-outbox-schema";
 import { ensureClaimMetadataSchema } from "./migrations/ensure-claim-metadata-schema";
 import { ensureClaimReviewerSchema } from "./migrations/ensure-claim-reviewer-schema";
 import { ensureExtractionJobProgressSchema } from "./migrations/ensure-extraction-job-progress-schema";
+import { ensureOcrPreprocessHistorySchema } from "./migrations/ensure-ocr-preprocess-history-schema";
 
 export const sequelize = new Sequelize(env.DATABASE_URL, {
   dialect: "postgres",
@@ -40,6 +42,7 @@ export const sequelize = new Sequelize(env.DATABASE_URL, {
     ClaimDocumentModel,
     ExtractionJobModel,
     ExtractionResultModel,
+    OcrPreprocessHistoryModel,
     AuditLogModel,
     RefreshTokenModel,
     NotificationModel,
@@ -83,6 +86,7 @@ export async function initDatabase() {
   await ensureClaimReviewerSchema(sequelize);
   await ensureClaimMetadataSchema(sequelize);
   await ensureExtractionJobProgressSchema(sequelize);
+  await ensureOcrPreprocessHistorySchema(sequelize);
   await sequelize.sync();
   await backfillOrganizationOcrCredits();
   logger.info("Database initialized");
