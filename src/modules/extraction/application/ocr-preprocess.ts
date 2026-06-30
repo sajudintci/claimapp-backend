@@ -38,7 +38,7 @@ export type FilteredOcrJson = {
   pageCount: number;
 };
 
-export const OCR_FORMAT_SCHEMA_VERSION = 4;
+export const OCR_FORMAT_SCHEMA_VERSION = 6;
 
 export type LlmPreparedInput = {
   ocrText: string;
@@ -51,7 +51,13 @@ export type LlmPreparedInput = {
 };
 
 type AbbyyPosition = { l?: number; t?: number; r?: number; b?: number };
-type AbbyyLine = { text?: string; confidence?: number; position?: AbbyyPosition };
+type AbbyyWord = { text?: string; confidence?: number; position?: AbbyyPosition };
+type AbbyyLine = {
+  text?: string;
+  confidence?: number;
+  position?: AbbyyPosition;
+  words?: AbbyyWord[];
+};
 type AbbyyTextBlock = { id?: string; lines?: AbbyyLine[] };
 type AbbyyCell = {
   lines?: AbbyyLine[];
@@ -81,10 +87,12 @@ function normalizeLineText(text: string): string {
     .trim();
 }
 
-function normalizeConfidence(raw: unknown): number {
+/** Preserve ABBYY line confidence on the 0–100 scale (matches raw JSON). */
+function normalizeAbbyyConfidence(raw: unknown): number {
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 0;
-  return n > 1 ? Math.max(0, Math.min(1, n / 100)) : Math.max(0, Math.min(1, n));
+  if (!Number.isFinite(n) || n < 0) return 0;
+  if (n <= 1) return Math.round(Math.max(0, Math.min(1, n)) * 100);
+  return Math.round(Math.max(0, Math.min(100, n)));
 }
 
 export function parseAbbyyPosition(pos?: AbbyyPosition): AbbyyBox | undefined {
@@ -108,34 +116,71 @@ function horizontalGap(a: AbbyyBox, b: AbbyyBox): number {
   return 0;
 }
 
+function expandLineToBlocks(
+  line: AbbyyLine,
+  source: "text" | "table",
+  blockId?: string,
+): OcrTextBlockPayload[] {
+  const lineText = normalizeLineText(String(line.text ?? ""));
+  const lineConfidence = normalizeAbbyyConfidence(line.confidence);
+  const lineRegion = parseAbbyyPosition(line.position);
+
+  const wordEntries = (line.words ?? [])
+    .map((word) => ({
+      text: normalizeLineText(String(word.text ?? "")),
+      region: parseAbbyyPosition(word.position),
+      confidence: normalizeAbbyyConfidence(word.confidence ?? line.confidence),
+    }))
+    .filter((entry) => entry.text.length >= 2 && entry.region);
+
+  const hasWideWordSpread =
+    wordEntries.length >= 2 &&
+    wordEntries.some((entry, index) => {
+      if (index === 0) return false;
+      const prev = wordEntries[index - 1]!;
+      return horizontalGap(prev.region!, entry.region!) >= COLUMN_GAP_PX;
+    });
+
+  const useWordBoxes =
+    wordEntries.length > 0 &&
+    (source === "table" || wordEntries.length >= 2 || hasWideWordSpread);
+
+  if (useWordBoxes) {
+    return wordEntries.map((entry) => ({
+      id: blockId,
+      text: entry.text,
+      confidence: entry.confidence,
+      region: entry.region,
+      source,
+    }));
+  }
+
+  if (lineText.length < 2) return [];
+  return [
+    {
+      id: blockId,
+      text: lineText,
+      confidence: lineConfidence,
+      region: lineRegion,
+      source,
+    },
+  ];
+}
+
 function collectBlocksFromPage(page: AbbyyPage, pageNumber: number): OcrTextBlockPayload[] {
   const blocks: OcrTextBlockPayload[] = [];
 
-  const pushLine = (
-    line: AbbyyLine,
-    source: "text" | "table",
-    blockId?: string,
-  ) => {
-    const text = normalizeLineText(String(line.text ?? ""));
-    if (text.length < 2) return;
-    blocks.push({
-      id: blockId,
-      text,
-      confidence: normalizeConfidence(line.confidence),
-      region: parseAbbyyPosition(line.position),
-      source,
-    });
-  };
-
   for (const block of page.texts ?? []) {
     for (const line of block.lines ?? []) {
-      pushLine(line, "text", block.id);
+      blocks.push(...expandLineToBlocks(line, "text", block.id));
     }
   }
 
   for (const table of page.tables ?? []) {
     for (const cell of table.cells ?? []) {
-      for (const line of cell.lines ?? []) pushLine(line, "table");
+      for (const line of cell.lines ?? []) {
+        blocks.push(...expandLineToBlocks(line, "table"));
+      }
     }
   }
 
@@ -232,10 +277,10 @@ function renderStructuredBlocks(pages: OcrPagePayload[]): string {
       if (block.region) {
         const { l, r, t, b } = block.region;
         lines.push(
-          `[${idPrefix}x:${l}-${r}, y:${t}-${b}] "${block.text}" (confidence=${block.confidence.toFixed(2)}, source=${block.source})`,
+          `[${idPrefix}x:${l}-${r}, y:${t}-${b}] "${block.text}" (confidence=${block.confidence}, source=${block.source})`,
         );
       } else {
-        lines.push(`[${idPrefix}] "${block.text}" (confidence=${block.confidence.toFixed(2)})`);
+        lines.push(`[${idPrefix}] "${block.text}" (confidence=${block.confidence})`);
       }
     }
   }

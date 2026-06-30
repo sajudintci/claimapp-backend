@@ -17,6 +17,7 @@ import {
   postProcessExtractionWithLlm,
 } from "@/modules/extraction/application/llm-post-process";
 import { updateExtractionJobProgress } from "@/modules/extraction/application/extraction-job-progress";
+import { buildOcrPageLinesPayload } from "@/modules/extraction/application/ocr-page-lines-payload";
 import { saveOcrPreprocessHistory } from "@/modules/extraction/application/ocr-preprocess-history.service";
 import { createId } from "@/utils/id";
 import {
@@ -161,6 +162,7 @@ export const initExtractionQueue = async () => {
         ? await postProcessExtractionWithLlm(extracted.text, {
             filteredPlainText: extracted.filteredPlainText ?? extracted.text,
             extractionJobId: job.data.extractionJobId,
+            ocrPages: extracted.llmPrepared?.pages,
           })
         : {
             status: "failed" as const,
@@ -192,6 +194,10 @@ export const initExtractionQueue = async () => {
         const penalty = Math.min(0.35, verification.fieldsRejected * 0.04);
         confidence = Math.max(0, confidence - penalty);
       }
+      const ocrPageLines = extracted.llmPrepared
+        ? buildOcrPageLinesPayload(extracted.llmPrepared.pages)
+        : undefined;
+
       const extractedPayload = {
         claimId: job.data.claimId,
         source: extracted.source,
@@ -201,6 +207,7 @@ export const initExtractionQueue = async () => {
         ocrSufficient,
         ocrFiltered: extracted.ocrFiltered,
         ocrPageCount: extracted.ocrPageCount ?? null,
+        ...(ocrPageLines && ocrPageLines.length > 0 ? { ocrPageLines } : {}),
         abbyyTransactionId: extracted.abbyyTransactionId ?? null,
         abbyySkillId: extracted.abbyySkillId ?? null,
         abbyyRawResults: extracted.abbyyRawResults ?? null,
@@ -219,7 +226,7 @@ export const initExtractionQueue = async () => {
         llmError: llmOutcome.error,
         llmAttempts: llmOutcome.attempts,
         extractionVerification: llmOutcome.verification ?? null,
-        schemaVersion: 4,
+        schemaVersion: 5,
       };
 
       const nextStatus = resolveClaimStatus({

@@ -3,6 +3,8 @@ export type FieldValueOrigin = "ocr" | "llm_synthesis";
 export type FieldTrace = {
   source_text: string;
   page: number | null;
+  /** ABBYY layout box when resolved from structured OCR blocks. */
+  region?: { l: number; t: number; r: number; b: number };
 };
 
 export type TracedField = {
@@ -12,9 +14,9 @@ export type TracedField = {
   confidence: number;
   /** Additional OCR snippets when a value is supported by multiple pages. */
   traces?: FieldTrace[];
-  /** Where the displayed value came from: verbatim OCR extraction vs LLM synthesis from structured fields. */
+  /** @deprecated Legacy extractions may still store synthesis metadata; no longer written. */
   value_origin?: FieldValueOrigin;
-  /** JSON paths used when value_origin is llm_synthesis (e.g. items[0].description, tests[1].result). */
+  /** @deprecated Legacy extractions may still store synthesis metadata; no longer written. */
   derived_from?: string[];
 };
 
@@ -27,6 +29,7 @@ export type ExtractionLineItem = {
   page: number | null;
   confidence: number;
   traces?: FieldTrace[];
+  field_traces?: Partial<Record<"description" | "quantity" | "amount" | "related_doctor", FieldTrace[]>>;
   field_origins?: Partial<
     Record<"description" | "quantity" | "amount" | "related_doctor", FieldValueOrigin>
   >;
@@ -42,6 +45,9 @@ export type ExtractionTestResult = {
   page: number | null;
   confidence: number;
   traces?: FieldTrace[];
+  field_traces?: Partial<
+    Record<"test_category" | "test_name" | "result" | "unit" | "reference_range", FieldTrace[]>
+  >;
   field_origins?: Partial<
     Record<
       "test_category" | "test_name" | "result" | "unit" | "reference_range",

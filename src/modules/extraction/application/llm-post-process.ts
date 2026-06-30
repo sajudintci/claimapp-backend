@@ -15,9 +15,9 @@ import {
   LlmParseFailureReason,
   LlmParseResult,
 } from "@/modules/extraction/application/llm-json-parse";
-import {
-  enrichClaimsWithClinicalSynthesis,
-} from "@/modules/extraction/application/clinical-field-synthesis";
+import { attachOcrBlockRegions } from "@/modules/extraction/application/attach-ocr-block-regions";
+import { enrichExtractionResultTraces } from "@/modules/extraction/application/enrich-field-traces";
+import type { OcrPagePayload } from "@/modules/extraction/application/ocr-preprocess";
 import { updateExtractionJobProgress } from "@/modules/extraction/application/extraction-job-progress";
 import {
   verifyAndRepairExtraction,
@@ -124,13 +124,6 @@ function normalizeTracedField(input: unknown, monetary = false): TracedField {
     value = "not_found";
   }
 
-  const valueOriginRaw = input.value_origin;
-  const value_origin =
-    valueOriginRaw === "llm_synthesis" || valueOriginRaw === "ocr" ? valueOriginRaw : undefined;
-  const derived_from = Array.isArray(input.derived_from)
-    ? input.derived_from.filter((entry): entry is string => typeof entry === "string")
-    : undefined;
-
   const source_text =
     typeof input.source_text === "string"
       ? input.source_text.slice(0, MAX_SOURCE_TEXT_CHARS)
@@ -144,8 +137,6 @@ function normalizeTracedField(input: unknown, monetary = false): TracedField {
     page,
     confidence: value === "not_found" ? 0 : confidence,
     ...(traces.length > 0 ? { traces } : {}),
-    ...(value_origin ? { value_origin } : {}),
-    ...(derived_from && derived_from.length > 0 ? { derived_from } : {}),
   });
 }
 
@@ -532,6 +523,7 @@ export function isLlmPostProcessEnabled(): boolean {
 export type LlmPostProcessOptions = {
   filteredPlainText?: string;
   extractionJobId?: string;
+  ocrPages?: OcrPagePayload[];
 };
 
 export async function postProcessExtractionWithLlm(
@@ -577,13 +569,17 @@ export async function postProcessExtractionWithLlm(
       const verified = verifyAndRepairExtraction(outcome.result, {
         filteredPlainText: options?.filteredPlainText ?? rawText,
       });
-      const enriched = await enrichClaimsWithClinicalSynthesis(verified.result);
-      if (enriched.stats.fieldsSynthesized > 0) {
-        logger.info("Clinical field synthesis applied", enriched.stats);
-      }
+      const enriched = enrichExtractionResultTraces(
+        verified.result,
+        options?.filteredPlainText ?? rawText,
+      );
+      const withRegions =
+        options?.ocrPages && options.ocrPages.length > 0
+          ? attachOcrBlockRegions(enriched, options.ocrPages)
+          : enriched;
       return {
         status: "ok",
-        result: enriched.result,
+        result: withRegions,
         verification: verified.stats,
         error: null,
         attempts: attempt,

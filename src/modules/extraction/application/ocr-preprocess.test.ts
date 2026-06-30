@@ -44,6 +44,63 @@ describe("filterOcrJson", () => {
     expect(filtered.plainText).toContain("Nama Pasien");
     expect(filtered.plainText).toContain("No Pegawai");
     expect(filtered.pages[0]!.blocks).toHaveLength(2);
+    expect(filtered.pages[0]!.blocks[0]!.confidence).toBe(90);
+    expect(filtered.pages[0]!.blocks[1]!.confidence).toBe(88);
+  });
+
+  it("splits merged table cell lines into word boxes for precise highlights", () => {
+    const filtered = filterOcrJson({
+      layout: {
+        pages: [
+          {
+            width: 1654,
+            height: 2340,
+            tables: [
+              {
+                cells: [
+                  {
+                    lines: [
+                      {
+                        text: "VISITE 800.000,",
+                        confidence: 55,
+                        position: { l: 139, t: 990, r: 1252, b: 1028 },
+                        words: [
+                          {
+                            text: "VISITE",
+                            confidence: 55,
+                            position: { l: 139, t: 991, r: 202, b: 1009 },
+                          },
+                          {
+                            text: "800.000,",
+                            confidence: 55,
+                            position: { l: 1176, t: 1008, r: 1252, b: 1028 },
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const blocks = filtered.pages[0]!.blocks;
+    expect(blocks).toHaveLength(2);
+    expect(blocks.find((b) => b.text === "VISITE")?.region).toEqual({
+      l: 139,
+      t: 991,
+      r: 202,
+      b: 1009,
+    });
+    expect(blocks.find((b) => b.text === "800.000,")?.region).toEqual({
+      l: 1176,
+      t: 1008,
+      r: 1252,
+      b: 1028,
+    });
   });
 });
 
@@ -76,6 +133,8 @@ describe("prepareForLLM", () => {
     expect(prepared.ocrText).not.toContain("PRE-EXTRACTED");
     expect(prepared.ocrText).not.toContain("LAYOUT PAIRS");
     expect(prepared.ocrText).toContain("Martha Friska Hospital");
+    expect(prepared.ocrText).toContain("(confidence=95, source=text)");
+    expect(prepared.ocrText).not.toMatch(/confidence=0\.\d+/);
     expect(prepared.ocrText).toContain("=== FILTERED OCR TEXT");
     expect(prepared.pages).toHaveLength(1);
     expect(prepared.chunks[0]!.text).toContain("--- Page 1 ---");
@@ -115,5 +174,22 @@ describe("prepareForLLM", () => {
 describe("preprocessAbbyyOcrJson", () => {
   it("returns null when no lines", () => {
     expect(preprocessAbbyyOcrJson({ layout: { pages: [{ texts: [] }] } })).toBeNull();
+  });
+
+  it("maps ABBYY confidence -1 to 0", () => {
+    const filtered = filterOcrJson({
+      layout: {
+        pages: [
+          {
+            texts: [
+              {
+                lines: [{ text: "Valid line", confidence: -1, position: { l: 10, t: 20, r: 100, b: 40 } }],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(filtered.pages[0]!.blocks[0]!.confidence).toBe(0);
   });
 });

@@ -3,7 +3,7 @@ import {
   buildOcrPreprocessHistoryPayload,
   OCR_PREPROCESS_HISTORY_SCHEMA_VERSION,
 } from "./ocr-preprocess-history";
-import type { LlmPreparedInput } from "@/modules/extraction/application/ocr-preprocess";
+import { OCR_FORMAT_SCHEMA_VERSION, type LlmPreparedInput } from "@/modules/extraction/application/ocr-preprocess";
 
 describe("buildOcrPreprocessHistoryPayload", () => {
   it("captures LLM OCR payload and page summaries", () => {
@@ -20,7 +20,7 @@ describe("buildOcrPreprocessHistoryPayload", () => {
           blocks: [
             {
               text: "Nama Pasien",
-              confidence: 0.9,
+              confidence: 90,
               region: { l: 100, t: 200, r: 220, b: 220 },
               source: "text",
             },
@@ -30,9 +30,9 @@ describe("buildOcrPreprocessHistoryPayload", () => {
       ],
     };
 
-    const payload = buildOcrPreprocessHistoryPayload(prepared, 4);
+    const payload = buildOcrPreprocessHistoryPayload(prepared, OCR_FORMAT_SCHEMA_VERSION);
     expect(payload.schemaVersion).toBe(OCR_PREPROCESS_HISTORY_SCHEMA_VERSION);
-    expect(payload.formatSchemaVersion).toBe(4);
+    expect(payload.formatSchemaVersion).toBe(OCR_FORMAT_SCHEMA_VERSION);
     expect(payload.ocrText).toContain("STRUCTURED OCR BLOCKS");
     expect(payload.pageSummaries).toEqual([{ page: 1, blockCount: 1, tableCount: 0 }]);
   });

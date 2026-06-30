@@ -3,8 +3,51 @@ import type { FieldTrace, TracedField } from "@/modules/extraction/domain/extrac
 export const MAX_FIELD_TRACES = 8;
 export const MAX_TRACE_SOURCE_CHARS = 400;
 
+/** Dedupe key: same page + source_text can have multiple regions (e.g. header/footer). */
+export function traceDedupeKey(trace: FieldTrace): string {
+  const region = trace.region;
+  const regionPart = region
+    ? `${region.l},${region.t},${region.r},${region.b}`
+    : "na";
+  return `${trace.page ?? "na"}::${regionPart}::${trace.source_text}`;
+}
+
+export function mergeTraceLists(...lists: FieldTrace[][]): FieldTrace[] {
+  const seen = new Set<string>();
+  const out: FieldTrace[] = [];
+
+  for (const list of lists) {
+    for (const trace of list) {
+      if (trace.page == null || trace.page <= 0) continue;
+      const key = traceDedupeKey(trace);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(trace);
+      if (out.length >= MAX_FIELD_TRACES) return out;
+    }
+  }
+
+  return out.sort((a, b) => {
+    const pageA = a.page ?? 0;
+    const pageB = b.page ?? 0;
+    if (pageA !== pageB) return pageA - pageB;
+    return (a.region?.t ?? 0) - (b.region?.t ?? 0);
+  });
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseRegion(input: unknown): FieldTrace["region"] | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const l = Number((input as { l?: unknown }).l);
+  const t = Number((input as { t?: unknown }).t);
+  const r = Number((input as { r?: unknown }).r);
+  const b = Number((input as { b?: unknown }).b);
+  if (![l, t, r, b].every(Number.isFinite)) return undefined;
+  if (r <= l || b <= t) return undefined;
+  return { l, t, r, b };
 }
 
 function normalizeTraceEntry(input: unknown): FieldTrace | null {
@@ -15,7 +58,8 @@ function normalizeTraceEntry(input: unknown): FieldTrace | null {
       : "";
   const page = typeof input.page === "number" && input.page > 0 ? input.page : null;
   if (!source_text) return null;
-  return { source_text, page };
+  const region = parseRegion(input.region);
+  return region ? { source_text, page, region } : { source_text, page };
 }
 
 /** Normalize traces from LLM input; always includes primary source_text/page when present. */
@@ -28,7 +72,7 @@ export function normalizeFieldTraces(
 
   const push = (trace: FieldTrace | null) => {
     if (!trace) return;
-    const key = `${trace.page ?? "na"}::${trace.source_text}`;
+    const key = traceDedupeKey(trace);
     if (seen.has(key)) return;
     seen.add(key);
     traces.push(trace);
