@@ -18,6 +18,11 @@ async function runRelayCycle() {
 }
 
 export async function initOutboxRelay() {
+  if (!env.RUN_OUTBOX_RELAY) {
+    logger.info("Outbox relay disabled (RUN_OUTBOX_RELAY=false)");
+    return;
+  }
+
   await withDistributedLock(
     DistributedLockKey.OUTBOX_RECOVER,
     recoverStuckOutboxMessages,

@@ -1,8 +1,8 @@
 import { Job, Queue, Worker } from "bullmq";
+import { ExtractionJobModel } from "@/database/models/extraction-job.model";
 import { env } from "@/config/env";
 import { getRedisConnection } from "@/config/redis";
 import { ClaimDocumentModel } from "@/database/models/claim-document.model";
-import { ExtractionJobModel } from "@/database/models/extraction-job.model";
 import { ExtractionResultModel } from "@/database/models/extraction-result.model";
 import { ClaimModel } from "@/database/models/claim.model";
 import { validateClaimsBilling } from "@/modules/extraction/application/billing-validation";
@@ -21,17 +21,25 @@ import { buildOcrPageLinesPayload } from "@/modules/extraction/application/ocr-p
 import { saveOcrPreprocessHistory } from "@/modules/extraction/application/ocr-preprocess-history.service";
 import { createId } from "@/utils/id";
 import {
-  assertSufficientOcrCredits,
-  creditsFromPageCount,
+  adjustOcrCreditReservation,
   deductOcrCreditsForSuccessfulExtraction,
   InsufficientOcrCreditsError,
+  releaseOcrCreditReservation,
 } from "@/modules/ocr-credits/application/ocr-credits.service";
 import { AuditAction } from "@/modules/audit/domain/audit-actions";
+import {
+  buildExtractionCompletedNotification,
+  buildExtractionFailedNotification,
+  buildLowOcrCreditsNotification,
+} from "@/modules/notifications/application/notification-events";
+import { createOrganizationNotification } from "@/modules/notifications/application/notifications.service";
 import { writeSystemAudit } from "@/utils/audit-request";
 import { logger } from "@/infrastructure/logger/winston";
 
 const connection = getRedisConnection();
 export const extractionQueue = new Queue("extraction-queue", { connection });
+
+let extractionWorker: Worker<ExtractionPayload> | null = null;
 
 type ExtractionPayload = { claimId: string; extractionJobId: string };
 
@@ -76,12 +84,38 @@ function resolveClaimStatus(params: {
   return "Extracted";
 }
 
-export const enqueueExtraction = async (payload: ExtractionPayload) => {
+export type ExtractionEnqueuePayload = { claimId: string; extractionJobId: string };
+
+export type EnqueueExtractionResult = {
+  enqueued: boolean;
+  reason?: "already_completed" | "job_failed" | "job_not_found" | "already_queued" | "enqueued";
+};
+
+/** Idempotent enqueue — never re-queue jobs already completed/failed in DB. */
+export const enqueueExtraction = async (
+  payload: ExtractionEnqueuePayload,
+): Promise<EnqueueExtractionResult> => {
+  const job = await ExtractionJobModel.findByPk(payload.extractionJobId);
+  if (!job) {
+    logger.warn("Skip enqueue: extraction job not found", payload);
+    return { enqueued: false, reason: "job_not_found" };
+  }
+
+  if (job.status === "COMPLETED") {
+    logger.info("Skip enqueue: extraction already completed", payload);
+    return { enqueued: false, reason: "already_completed" };
+  }
+
+  if (job.status === "FAILED") {
+    logger.info("Skip enqueue: extraction job already failed", payload);
+    return { enqueued: false, reason: "job_failed" };
+  }
+
   const existing = await extractionQueue.getJob(payload.extractionJobId);
   if (existing) {
     const state = await existing.getState();
     if (state === "waiting" || state === "active" || state === "delayed") {
-      return;
+      return { enqueued: false, reason: "already_queued" };
     }
     if (state === "completed" || state === "failed") {
       await existing.remove();
@@ -93,10 +127,17 @@ export const enqueueExtraction = async (payload: ExtractionPayload) => {
     attempts: 3,
     backoff: { type: "exponential", delay: 3000 },
   });
+
+  return { enqueued: true, reason: "enqueued" };
 };
 
 export const initExtractionQueue = async () => {
-  const worker = new Worker(
+  if (!env.RUN_EXTRACTION_WORKER) {
+    logger.info("Extraction worker disabled (RUN_EXTRACTION_WORKER=false)");
+    return;
+  }
+
+  extractionWorker = new Worker(
     "extraction-queue",
     async (job: Job<ExtractionPayload>) => {
       await ExtractionJobModel.update(
@@ -108,8 +149,6 @@ export const initExtractionQueue = async () => {
       if (!claim) {
         throw new Error("Claim not found");
       }
-
-      await assertSufficientOcrCredits(claim.organizationId, 1);
 
       const latestDocument = await ClaimDocumentModel.findOne({
         where: { claimId: job.data.claimId },
@@ -149,8 +188,11 @@ export const initExtractionQueue = async () => {
 
       await updateExtractionJobProgress(job.data.extractionJobId, "llm");
 
-      const ocrCreditsRequired = creditsFromPageCount(extracted.ocrPageCount);
-      await assertSufficientOcrCredits(claim.organizationId, ocrCreditsRequired);
+      await adjustOcrCreditReservation({
+        organizationId: claim.organizationId,
+        extractionJobId: job.data.extractionJobId,
+        pageCount: extracted.ocrPageCount,
+      });
 
       const ocrSufficient = isOcrTextSufficient(extracted.text, extracted.filteredPlainText);
       const localConfidence = estimateConfidence(
@@ -261,12 +303,23 @@ export const initExtractionQueue = async () => {
 
       await updateExtractionJobProgress(job.data.extractionJobId, "persist");
 
-      await ExtractionResultModel.create({
-        id: createId(),
-        claimId: job.data.claimId,
-        payload: finalPayload,
-        source: extracted.source,
-      } as any);
+      const existingResult = await ExtractionResultModel.findOne({
+        where: { extractionJobId: job.data.extractionJobId },
+      });
+      if (existingResult) {
+        await existingResult.update({
+          payload: finalPayload,
+          source: extracted.source,
+        });
+      } else {
+        await ExtractionResultModel.create({
+          id: createId(),
+          claimId: job.data.claimId,
+          extractionJobId: job.data.extractionJobId,
+          payload: finalPayload,
+          source: extracted.source,
+        } as any);
+      }
 
       await ClaimModel.update(
         {
@@ -294,6 +347,35 @@ export const initExtractionQueue = async () => {
           result: "Success",
         },
       });
+
+      const extractionNotice = buildExtractionCompletedNotification({
+        claimNumber: claim.claimNumber,
+        status: nextStatus,
+        insuredName: extractedPayload.summary.insuredName,
+        ocrInsufficient: !ocrSufficient,
+        llmExpected,
+        llmStatus: llmOutcome.status,
+        hasBillingMismatch: validation.hasBillingMismatch,
+        confidence,
+      });
+      await createOrganizationNotification({
+        organizationId: claim.organizationId,
+        ...extractionNotice,
+      });
+
+      if (
+        creditDebit.remaining <= env.OCR_LOW_CREDITS_NOTIFICATION_THRESHOLD &&
+        creditDebit.remaining + creditDebit.credits > env.OCR_LOW_CREDITS_NOTIFICATION_THRESHOLD
+      ) {
+        const lowCreditsNotice = buildLowOcrCreditsNotification({
+          remaining: creditDebit.remaining,
+          threshold: env.OCR_LOW_CREDITS_NOTIFICATION_THRESHOLD,
+        });
+        await createOrganizationNotification({
+          organizationId: claim.organizationId,
+          ...lowCreditsNotice,
+        });
+      }
     },
     {
       connection,
@@ -301,8 +383,11 @@ export const initExtractionQueue = async () => {
     },
   );
 
-  worker.on("failed", async (job, err) => {
+  extractionWorker.on("failed", async (job, err) => {
     if (!job) return;
+    const maxAttempts = job.opts.attempts ?? 1;
+    if (job.attemptsMade < maxAttempts) return;
+
     const isCreditError = err instanceof InsufficientOcrCreditsError;
     logger.error("Extraction job failed", {
       message: err.message,
@@ -310,12 +395,14 @@ export const initExtractionQueue = async () => {
       jobId: job.id,
       code: isCreditError ? err.code : undefined,
     });
+    const errorMessage = isCreditError
+      ? `Insufficient OCR credits (need ${err.required}, have ${err.remaining})`
+      : err.message;
+
     await ExtractionJobModel.update(
       {
         status: "FAILED",
-        errorMessage: isCreditError
-          ? `Insufficient OCR credits (need ${err.required}, have ${err.remaining})`
-          : err.message,
+        errorMessage,
         attempts: job.attemptsMade + 1,
         progressStage: "failed",
       },
@@ -323,6 +410,11 @@ export const initExtractionQueue = async () => {
     );
     const failedClaim = await ClaimModel.findByPk(job.data.claimId);
     if (failedClaim) {
+      await releaseOcrCreditReservation({
+        organizationId: failedClaim.organizationId,
+        extractionJobId: job.data.extractionJobId,
+      });
+
       if (isCreditError) {
         await ClaimModel.update(
           { status: "Failed" },
@@ -342,6 +434,16 @@ export const initExtractionQueue = async () => {
           result: "Failed",
         },
       });
+
+      const failureNotice = buildExtractionFailedNotification({
+        claimNumber: failedClaim.claimNumber,
+        errorMessage,
+        isCreditError,
+      });
+      await createOrganizationNotification({
+        organizationId: failedClaim.organizationId,
+        ...failureNotice,
+      });
     }
   });
 
@@ -349,3 +451,10 @@ export const initExtractionQueue = async () => {
     workerConcurrency: env.BULKHEAD_EXTRACTION_WORKER_CONCURRENCY,
   });
 };
+
+export async function stopExtractionQueue(): Promise<void> {
+  if (!extractionWorker) return;
+  await extractionWorker.close();
+  extractionWorker = null;
+  logger.info("Extraction worker stopped");
+}

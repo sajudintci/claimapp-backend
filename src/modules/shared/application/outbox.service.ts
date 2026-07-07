@@ -38,10 +38,13 @@ async function publishExtractionRequested(message: OutboxMessageModel): Promise<
   if (!payload?.claimId || !payload?.extractionJobId) {
     throw new Error("Invalid EXTRACTION_REQUESTED outbox payload");
   }
-  await enqueueExtraction({
+  const result = await enqueueExtraction({
     claimId: payload.claimId,
     extractionJobId: payload.extractionJobId,
   });
+  if (!result.enqueued && result.reason === "job_not_found") {
+    throw new Error("Extraction job not found for outbox message");
+  }
 }
 
 async function publishOutboxMessage(message: OutboxMessageModel): Promise<void> {
@@ -116,14 +119,42 @@ export async function processOutboxBatch(): Promise<number> {
   return published;
 }
 
-/** Re-queue stuck PROCESSING rows (e.g. crash after claim, before publish). */
+/** Reconcile stuck outbox rows against extraction job state. */
 export async function recoverStuckOutboxMessages(): Promise<number> {
-  const [count] = await OutboxMessageModel.update(
-    { status: OutboxMessageStatus.PENDING },
-    { where: { status: OutboxMessageStatus.PROCESSING } },
-  );
-  if (count > 0) {
-    logger.warn("Recovered stuck outbox messages", { count });
+  const [, publishedMeta] = await sequelize.query(`
+    UPDATE "outbox_messages" AS o
+    SET "status" = 'PUBLISHED',
+        "publishedAt" = COALESCE(o."publishedAt", NOW()),
+        "updatedAt" = NOW()
+    FROM "extraction_jobs" AS j
+    WHERE o."aggregateId" = j."id"
+      AND o."eventType" = 'EXTRACTION_REQUESTED'
+      AND o."status" IN ('PENDING', 'PROCESSING')
+      AND j."status" IN ('COMPLETED', 'FAILED')
+      AND o."deletedAt" IS NULL;
+  `);
+
+  const [, resetMeta] = await sequelize.query(`
+    UPDATE "outbox_messages" AS o
+    SET "status" = 'PENDING',
+        "updatedAt" = NOW()
+    FROM "extraction_jobs" AS j
+    WHERE o."aggregateId" = j."id"
+      AND o."eventType" = 'EXTRACTION_REQUESTED'
+      AND o."status" = 'PROCESSING'
+      AND j."status" IN ('QUEUED', 'PROCESSING')
+      AND o."deletedAt" IS NULL;
+  `);
+
+  const publishedRows = (publishedMeta as { rowCount?: number })?.rowCount ?? 0;
+  const resetRows = (resetMeta as { rowCount?: number })?.rowCount ?? 0;
+  const total = publishedRows + resetRows;
+
+  if (total > 0) {
+    logger.warn("Recovered stuck outbox messages", {
+      publishedCompletedOrFailed: publishedRows,
+      resetProcessing: resetRows,
+    });
   }
-  return count;
+  return total;
 }

@@ -19,12 +19,20 @@ import {
   getOcrPreprocessHistoryForClaim,
   listOcrPreprocessHistoriesForClaim,
 } from "@/modules/extraction/application/ocr-preprocess-history.service";
-import { parseClaimReviewMeta } from "@/modules/claims/domain/claim-review-result";
+import {
+  countFlaggedFields,
+  parseClaimFieldFlags,
+} from "@/modules/claims/domain/claim-field-flags";
 import {
   parseClaimUploadMetadata,
   validateClaimUploadInput,
 } from "@/modules/claims/domain/claim-upload-metadata";
 import { AuditAction } from "@/modules/audit/domain/audit-actions";
+import {
+  buildClaimReviewedNotification,
+  buildClaimUploadedNotification,
+} from "@/modules/notifications/application/notification-events";
+import { createOrganizationNotification } from "@/modules/notifications/application/notifications.service";
 import { writeAuditFromRequest } from "@/utils/audit-request";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -79,6 +87,8 @@ router.get("/export", async (req, res) => {
     q: parsed.q,
     reviewerId: parsed.reviewerId,
     unassigned: parsed.unassigned,
+    dateFrom: parsed.dateFrom,
+    dateTo: parsed.dateTo,
   });
 
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -225,6 +235,15 @@ router.post("/upload", upload.single("document"), async (req, res) => {
         metadata: uploadMetadata,
         result: "Success",
       },
+    });
+
+    const uploadNotice = buildClaimUploadedNotification({
+      claimNumber: data.claim.claimNumber,
+      fileName: req.file.originalname,
+    });
+    await createOrganizationNotification({
+      organizationId: req.auth!.org,
+      ...uploadNotice,
     });
 
     return res.success(data, {
@@ -413,7 +432,7 @@ router.patch("/:claimId/review", async (req, res) => {
 
   const nextStatus = req.body.status ?? "Reviewed";
   const reviewedResult = req.body.reviewedResult as Record<string, unknown> | null | undefined;
-  const reviewMeta = parseClaimReviewMeta(reviewedResult);
+  const fieldFlags = parseClaimFieldFlags(reviewedResult);
 
   await ClaimModel.update(
     {
@@ -431,9 +450,18 @@ router.patch("/:claimId/review", async (req, res) => {
     beforeChanges: { status: existing.status },
     afterChanges: {
       status: nextStatus,
-      reviewedFieldCount: reviewMeta.reviewedFieldKeys.length,
+      flaggedFieldCount: countFlaggedFields(fieldFlags),
       result: "Success",
     },
+  });
+
+  const reviewNotice = buildClaimReviewedNotification({
+    claimNumber: existing.claimNumber,
+    status: nextStatus,
+  });
+  await createOrganizationNotification({
+    organizationId: req.auth!.org,
+    ...reviewNotice,
   });
 
   const updated = await ClaimModel.findByPk(req.params.claimId);

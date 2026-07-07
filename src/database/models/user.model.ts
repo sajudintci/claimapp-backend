@@ -21,8 +21,8 @@ export class UserModel extends BaseModel<UserModel> {
   declare organizationId: string;
 
   @ForeignKey(() => DepartmentModel)
-  @Column(DataType.UUID)
-  declare departmentId: string;
+  @Column({ type: DataType.UUID, allowNull: true })
+  declare departmentId: string | null;
 
   @Column(DataType.STRING)
   declare name: string;

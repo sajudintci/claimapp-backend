@@ -2,6 +2,7 @@ import { Router } from "express";
 import { Op, type WhereOptions } from "sequelize";
 import { authMiddleware } from "@/middlewares/auth.middleware";
 import { AuditAction } from "@/modules/audit/domain/audit-actions";
+import { normalizeDateFilter } from "@/modules/claims/domain/claim-list-filters";
 import { AuditLogModel } from "@/database/models/audit-log.model";
 import { UserModel } from "@/database/models/user.model";
 import { toPagination } from "@/utils/pagination";
@@ -12,8 +13,10 @@ router.use(authMiddleware);
 
 router.get("/", async (req, res) => {
   const org = req.auth?.org;
-  const { page, limit, action, entityType, result, q } = req.query;
+  const { page, limit, action, entityType, result, q, dateFrom, dateTo } = req.query;
   const pg = toPagination(Number(page), Number(limit) || 25);
+  const parsedDateFrom = normalizeDateFilter(dateFrom);
+  const parsedDateTo = normalizeDateFilter(dateTo);
 
   const where: WhereOptions = { organizationId: org };
   if (typeof action === "string" && action.trim()) {
@@ -32,6 +35,17 @@ router.get("/", async (req, res) => {
         { ipAddress: { [Op.iLike]: needle } },
       ],
     });
+  }
+
+  if (parsedDateFrom || parsedDateTo) {
+    const createdAt: Record<symbol, Date> = {};
+    if (parsedDateFrom) {
+      createdAt[Op.gte] = new Date(`${parsedDateFrom}T00:00:00.000Z`);
+    }
+    if (parsedDateTo) {
+      createdAt[Op.lte] = new Date(`${parsedDateTo}T23:59:59.999Z`);
+    }
+    Object.assign(where, { createdAt });
   }
 
   const { rows, count } = await AuditLogModel.findAndCountAll({

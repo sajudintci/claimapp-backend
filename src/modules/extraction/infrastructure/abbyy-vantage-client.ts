@@ -2,6 +2,7 @@ import { env } from "@/config/env";
 import { logger } from "@/infrastructure/logger/winston";
 import { abbyyCircuitBreaker } from "@/infrastructure/resilience/circuit-breakers";
 import { abbyyBulkhead } from "@/infrastructure/resilience/bulkheads";
+import { runWithBulkhead } from "@/infrastructure/resilience/cluster-bulkhead";
 
 type VantageTokenResponse = {
   access_token?: string;
@@ -17,6 +18,7 @@ type VantageSkill = {
 
 type VantageResultFile = {
   fileId: string;
+  fileName?: string;
   type?: string;
 };
 
@@ -237,14 +239,26 @@ function collectResultFileIds(transaction: VantageTransaction): VantageResultFil
 export type AbbyyProcessResult = {
   transactionId: string;
   skillId: string;
-  rawResults: Array<{ fileId: string; type?: string; contentType: string; body: string }>;
+  rawResults: Array<{
+    fileId: string;
+    fileName?: string;
+    type?: string;
+    contentType: string;
+    body: string;
+  }>;
 };
 
 export async function processDocumentWithAbbyy(
   file: { buffer: Buffer; mimeType: string; originalFileName?: string },
 ): Promise<AbbyyProcessResult> {
   return abbyyCircuitBreaker.execute(() =>
-    abbyyBulkhead.run(async () => {
+    runWithBulkhead(
+      abbyyBulkhead,
+      {
+        acquireTimeoutMs: env.BULKHEAD_ABBYY_ACQUIRE_TIMEOUT_MS,
+        clusterTtlMs: env.ABBYY_TRANSACTION_TIMEOUT_MS,
+      },
+      async () => {
       const token = await getAccessToken();
       const skillId = await resolveAbbyySkillId();
       const fileName = file.originalFileName?.trim() || "document";
@@ -268,6 +282,7 @@ export async function processDocumentWithAbbyy(
         const downloaded = await downloadResultFile(token, transactionId, file.fileId);
         rawResults.push({
           fileId: file.fileId,
+          fileName: file.fileName,
           type: file.type,
           contentType: downloaded.contentType,
           body: downloaded.body,
@@ -281,6 +296,7 @@ export async function processDocumentWithAbbyy(
       });
 
       return { transactionId, skillId, rawResults };
-    }),
+      },
+    ),
   );
 }

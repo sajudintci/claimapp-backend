@@ -79,6 +79,13 @@ type AbbyyOcrJson = {
 const ROW_Y_TOLERANCE_PX = 20;
 const COLUMN_GAP_PX = 60;
 
+/** Detect ABBYY Text page markers — used only to split sections, not as page numbers. */
+export const ABBYY_PAGE_MARKER_RE = /\(\s*Page\s+(\d+)[^)]*of\s+\d+\s*\)/i;
+
+function minimalNormalizePlainText(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function normalizeLineText(text: string): string {
   return text
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
@@ -141,9 +148,10 @@ function expandLineToBlocks(
       return horizontalGap(prev.region!, entry.region!) >= COLUMN_GAP_PX;
     });
 
-  const useWordBoxes =
-    wordEntries.length > 0 &&
-    (source === "table" || wordEntries.length >= 2 || hasWideWordSpread);
+  // Only split to word-level boxes when words are genuinely in separate columns
+  // (wide horizontal gap). Phrase-level text like "Martha Friska Hospital" stays
+  // as a single block so multi-location lookup works on the full phrase.
+  const useWordBoxes = wordEntries.length > 0 && (source === "table" || hasWideWordSpread);
 
   if (useWordBoxes) {
     return wordEntries.map((entry) => ({
@@ -265,23 +273,22 @@ function renderStructuredBlocks(pages: OcrPagePayload[]): string {
 
   for (const page of pages) {
     lines.push(`--- Page ${page.page} ---`);
-    if (page.width && page.height) {
-      lines.push(`page_dimensions: width=${page.width}, height=${page.height}`);
-    }
     if (page.tableCount > 0) {
       lines.push(`tables: ${page.tableCount}`);
     }
 
-    for (const block of page.blocks) {
-      const idPrefix = block.id ? `${block.id.slice(0, 8)} ` : "";
-      if (block.region) {
-        const { l, r, t, b } = block.region;
-        lines.push(
-          `[${idPrefix}x:${l}-${r}, y:${t}-${b}] "${block.text}" (confidence=${block.confidence}, source=${block.source})`,
-        );
-      } else {
-        lines.push(`[${idPrefix}] "${block.text}" (confidence=${block.confidence})`);
-      }
+    // Render blocks as visual rows (wide column gaps → " || ") so the LLM
+    // sees label/value columns on the same line without raw pixel coordinates.
+    const rows = groupBlocksIntoVisualRows(page.blocks);
+    for (const row of rows) {
+      lines.push(row);
+    }
+
+    // Append table blocks as a compact row so cell values stay associated.
+    const tableBlocks = page.blocks.filter((b) => b.source === "table");
+    if (tableBlocks.length > 0) {
+      lines.push("[TABLE]");
+      lines.push(tableBlocks.map((b) => b.text).join(" | "));
     }
   }
 
@@ -357,21 +364,26 @@ export function prepareForLLM(
     text: renderPagePlainText(page),
   }));
 
-  const structuredBlocks = renderStructuredBlocks(filtered.pages);
+  // renderStructuredBlocks now produces the same visual-row layout as
+  // renderPagePlainText but with table blocks appended inline.  Both
+  // sections carry the same page markers so the LLM can orient itself.
+  // We keep the two-section structure so the LLM gets two passes at the
+  // content within the token budget.
+  const structuredSection = renderStructuredBlocks(filtered.pages);
   const structuredCap = Math.max(4000, Math.floor(maxChars * 0.75));
-  const structuredSection = structuredBlocks.slice(0, structuredCap);
+  const structuredTruncated = structuredSection.slice(0, structuredCap);
 
   let plainBody = filtered.plainText;
-  const remaining = Math.max(0, maxChars - structuredSection.length - 200);
+  const remaining = Math.max(0, maxChars - structuredTruncated.length - 200);
   if (plainBody.length > remaining) {
     plainBody = plainBody.slice(0, remaining);
   }
 
   const ocrText = [
-    "=== STRUCTURED OCR BLOCKS (position + text, top to bottom) ===",
-    structuredSection,
+    "=== OCR TEXT (visual rows by page, wide column gaps shown as ' || ') ===",
+    structuredTruncated,
     "",
-    "=== FILTERED OCR TEXT (visual rows by page) ===",
+    "=== OCR TEXT REPEATED (plain fallback for truncated pages) ===",
     plainBody,
   ].join("\n");
 
@@ -398,4 +410,88 @@ export function preprocessAbbyyOcrJson(
   }
 
   return prepareForLLM(filtered, maxChars);
+}
+
+function splitPlainTextByMarkerRegex(
+  plainText: string,
+  markerRe: RegExp,
+): Array<{ page: number; text: string }> {
+  const trimmed = plainText.trim();
+  if (!trimmed) return [];
+
+  const matches = [...trimmed.matchAll(markerRe)];
+  if (matches.length === 0) {
+    return [{ page: 1, text: trimmed }];
+  }
+
+  const slices: Array<{ page: number; text: string }> = [];
+  const first = matches[0]!;
+  if (first.index! > 0) {
+    const leading = trimmed.slice(0, first.index!).trim();
+    if (leading) slices.push({ page: 1, text: leading });
+  }
+
+  for (let i = 0; i < matches.length; i++) {
+    const match = matches[i]!;
+    const page = i + 1;
+    const contentStart = match.index! + match[0].length;
+    const contentEnd = i + 1 < matches.length ? matches[i + 1]!.index! : trimmed.length;
+    const text = trimmed.slice(contentStart, contentEnd).trim();
+    if (text) {
+      slices.push({ page, text });
+    }
+  }
+
+  return slices;
+}
+
+/** Split ABBYY Text output by `(Page N of M)` markers; page numbers are 1-based layout index. */
+export function splitAbbyyPlainTextByPage(plainText: string): Array<{ page: number; text: string }> {
+  return splitPlainTextByMarkerRegex(plainText, new RegExp(ABBYY_PAGE_MARKER_RE.source, "gi"));
+}
+
+/**
+ * Dual-file path: plain Text file for LLM, OcrJson layout for positions.
+ * Does not run prepareForLLM / visual-row formatting.
+ */
+export function combineAbbyyTextAndLayout(
+  plainTextBody: string,
+  rawOcrJson: unknown,
+  maxChars = env.LLM_OCR_MAX_CHARS,
+): LlmPreparedInput | null {
+  const filtered = filterOcrJson(rawOcrJson);
+  if (filtered.pageCount === 0) return null;
+
+  const normalized = minimalNormalizePlainText(plainTextBody);
+  const truncated = normalized.slice(0, maxChars);
+  const charCount = truncated.replace(/\s+/g, "").length;
+
+  return {
+    ocrText: truncated,
+    filteredPlainText: truncated,
+    ocrCharCount: charCount,
+    filteredCharCount: charCount,
+    pageCount: filtered.pageCount,
+    pages: filtered.pages,
+    chunks: alignTextChunksToLayoutPages(truncated, filtered.pageCount),
+  };
+}
+
+/** Map Text file sections to OcrJson layout index (1..pageCount), not document page markers. */
+function alignTextChunksToLayoutPages(
+  plainText: string,
+  pageCount: number,
+): Array<{ page: number; text: string }> {
+  const slices = splitAbbyyPlainTextByPage(plainText);
+  if (pageCount <= 0) return slices;
+
+  const chunks: Array<{ page: number; text: string }> = [];
+  for (let i = 0; i < pageCount; i++) {
+    const slice = slices[i];
+    chunks.push({
+      page: i + 1,
+      text: slice?.text ?? "",
+    });
+  }
+  return chunks.filter((chunk) => chunk.text.length > 0);
 }

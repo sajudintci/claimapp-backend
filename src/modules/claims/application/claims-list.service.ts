@@ -47,6 +47,17 @@ function buildWhere(filters: ClaimListFilters): WhereOptions {
     Object.assign(where, buildSearchWhere(filters.q));
   }
 
+  if (filters.dateFrom || filters.dateTo) {
+    const createdAt: Record<symbol, Date> = {};
+    if (filters.dateFrom) {
+      createdAt[Op.gte] = new Date(`${filters.dateFrom}T00:00:00.000Z`);
+    }
+    if (filters.dateTo) {
+      createdAt[Op.lte] = new Date(`${filters.dateTo}T23:59:59.999Z`);
+    }
+    Object.assign(where, { createdAt });
+  }
+
   return where;
 }
 
@@ -113,24 +124,34 @@ function readSummaryField(
   return typeof value === "string" ? value : "";
 }
 
-function readClaimDate(extractionResult: Record<string, unknown> | null): string {
-  const claims = extractionResult?.claims;
-  if (!Array.isArray(claims) || claims.length === 0) return "";
-  const encounter = claims[0]?.encounter;
-  if (!encounter || typeof encounter !== "object") return "";
-  const admission = (encounter as Record<string, unknown>).admission_date;
-  if (!admission || typeof admission !== "object") return "";
-  const value = (admission as Record<string, unknown>).value;
-  return typeof value === "string" && value !== "not_found" ? value : "";
+function readMetadataPatientName(metadata: Record<string, unknown> | null): string {
+  const name = metadata?.patientName;
+  return typeof name === "string" ? name.trim() : "";
+}
+
+function readMetadataDocumentType(metadata: Record<string, unknown> | null): string {
+  const raw = metadata?.documentType;
+  if (Array.isArray(raw)) return raw.filter((v) => typeof v === "string" && v.trim()).join("; ");
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  return "";
+}
+
+function readMetadataPriority(metadata: Record<string, unknown> | null): string {
+  const priority = metadata?.priority;
+  return typeof priority === "string" ? priority.trim() : "";
 }
 
 function toCsvRow(item: ClaimListItemDto): ClaimCsvRow {
+  const metadata = item.metadata;
   return {
     claimNumber: item.claimNumber,
-    claimDate: readClaimDate(item.extractionResult),
     documentFileName: item.primaryDocument?.originalName ?? "",
-    patientName: readSummaryField(item.extractionResult, "insuredName"),
-    provider: readSummaryField(item.extractionResult, "provider"),
+    patientName:
+      readMetadataPatientName(metadata) ||
+      readSummaryField(item.extractionResult, "insuredName"),
+    documentType: readMetadataDocumentType(metadata),
+    priority: readMetadataPriority(metadata),
+    hospitalName: readSummaryField(item.extractionResult, "provider"),
     uploadDate: item.createdAt.slice(0, 10),
     status: item.status,
     reviewerName: item.reviewer?.name ?? "",

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildClaimsCsv,
+  normalizeDateFilter,
   normalizeReviewerFilter,
   normalizeSearchQuery,
   normalizeStatusFilter,
@@ -41,6 +42,26 @@ describe("claim-list-filters", () => {
     });
   });
 
+  it("normalizes createdAt date filters", () => {
+    expect(normalizeDateFilter("2026-06-20")).toBe("2026-06-20");
+    expect(normalizeDateFilter("2026-13-01")).toBeUndefined();
+    expect(normalizeDateFilter("invalid")).toBeUndefined();
+  });
+
+  it("parses createdAt date range query params", () => {
+    expect(
+      parseClaimListQuery({
+        page: "1",
+        limit: "10",
+        dateFrom: "2026-01-01",
+        dateTo: "2026-01-31",
+      }),
+    ).toMatchObject({
+      dateFrom: "2026-01-01",
+      dateTo: "2026-01-31",
+    });
+  });
+
   it("truncates long search queries", () => {
     const long = "a".repeat(250);
     expect(normalizeSearchQuery(long)?.length).toBe(200);
@@ -54,10 +75,11 @@ describe("claim-list-filters", () => {
     const csv = buildClaimsCsv([
       {
         claimNumber: "CLM-1",
-        claimDate: "2026-06-20",
         documentFileName: "file,one.pdf",
         patientName: "Dewi",
-        provider: "Hospital",
+        documentType: "Inpatient Claim",
+        priority: "Normal",
+        hospitalName: "RS Martha Friska",
         uploadDate: "2026-06-22",
         status: "Reviewed",
         reviewerName: "Sarah",

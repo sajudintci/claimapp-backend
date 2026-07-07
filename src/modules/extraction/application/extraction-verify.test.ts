@@ -117,6 +117,52 @@ describe("verifyAndRepairExtraction patient.name", () => {
     expect(result.claims[0]!.patient.name.value).toBe("Budi Santoso");
   });
 
+  it("rejects website URL as provider.email", () => {
+    const claim = emptyClaim({
+      provider: {
+        hospital_name: NOT_FOUND,
+        address: NOT_FOUND,
+        city: NOT_FOUND,
+        phone: NOT_FOUND,
+        email: {
+          value: "www.marthafriska.com",
+          source_text: "www.marthafriska.com",
+          page: 2,
+          confidence: 0.9,
+        },
+      },
+    });
+
+    const { result } = verifyAndRepairExtraction(resultWithClaim(claim), {
+      filteredPlainText: "www.marthafriska.com Martha Friska Hospital",
+    });
+
+    expect(result.claims[0]!.provider.email.value).toBe("not_found");
+  });
+
+  it("keeps valid provider email", () => {
+    const claim = emptyClaim({
+      provider: {
+        hospital_name: NOT_FOUND,
+        address: NOT_FOUND,
+        city: NOT_FOUND,
+        phone: NOT_FOUND,
+        email: {
+          value: "info@marthafriska.com",
+          source_text: "Email: info@marthafriska.com",
+          page: 2,
+          confidence: 0.9,
+        },
+      },
+    });
+
+    const { result } = verifyAndRepairExtraction(resultWithClaim(claim), {
+      filteredPlainText: "Email: info@marthafriska.com",
+    });
+
+    expect(result.claims[0]!.provider.email.value).toBe("info@marthafriska.com");
+  });
+
   it("rejects monetary label token as total_amount_read", () => {
     const claim = emptyClaim({
       billing: {
@@ -138,5 +184,26 @@ describe("verifyAndRepairExtraction patient.name", () => {
     });
 
     expect(result.claims[0]!.billing.total_amount_read.value).toBe("not_found");
+  });
+
+  it("repairs diagnosis.icd10_code from OCR when LLM left it not_found", () => {
+    const claim = emptyClaim({
+      diagnosis: {
+        icd10_code: NOT_FOUND,
+        icd10_description: {
+          value: "Pneumonia",
+          source_text: "Diagnosis: J18.9 Pneumonia",
+          page: 3,
+          confidence: 0.9,
+        },
+      },
+    });
+
+    const { result, stats } = verifyAndRepairExtraction(resultWithClaim(claim), {
+      filteredPlainText: "Diagnosis: J18.9 Pneumonia",
+    });
+
+    expect(result.claims[0]!.diagnosis.icd10_code.value).toBe("J18.9");
+    expect(stats.repairedPaths).toContain("diagnosis.icd10_code");
   });
 });

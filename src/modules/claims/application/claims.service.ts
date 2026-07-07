@@ -7,9 +7,9 @@ import { createId } from "@/utils/id";
 import { StorageService } from "@/storage/storage.interface";
 import { queueExtractionRequested } from "@/modules/shared/application/outbox.service";
 import {
-  assertSufficientOcrCredits,
   ensureOrganizationOcrCredits,
   InsufficientOcrCreditsError,
+  reserveOcrCredits,
 } from "@/modules/ocr-credits/application/ocr-credits.service";
 import type { ClaimUploadMetadata } from "@/modules/claims/domain/claim-upload-metadata";
 
@@ -25,14 +25,6 @@ export class ClaimsService {
     metadata?: ClaimUploadMetadata | null;
   }) {
     await ensureOrganizationOcrCredits(params.organizationId);
-    try {
-      await assertSufficientOcrCredits(params.organizationId, 1);
-    } catch (err) {
-      if (err instanceof InsufficientOcrCreditsError) {
-        throw new Error("INSUFFICIENT_OCR_CREDITS");
-      }
-      throw err;
-    }
 
     const claimId = createId();
     const documentId = createId();
@@ -83,6 +75,23 @@ export class ClaimsService {
         transaction,
       );
 
+      try {
+        await reserveOcrCredits(
+          {
+            organizationId: params.organizationId,
+            claimId: claim.id,
+            extractionJobId: extractionJob.id,
+            credits: 1,
+          },
+          transaction,
+        );
+      } catch (err) {
+        if (err instanceof InsufficientOcrCreditsError) {
+          throw new Error("INSUFFICIENT_OCR_CREDITS");
+        }
+        throw err;
+      }
+
       return { claim, extractionJob };
     });
 
@@ -91,14 +100,6 @@ export class ClaimsService {
 
   async retryExtraction(params: { claimId: string; organizationId: string }) {
     await ensureOrganizationOcrCredits(params.organizationId);
-    try {
-      await assertSufficientOcrCredits(params.organizationId, 1);
-    } catch (err) {
-      if (err instanceof InsufficientOcrCreditsError) {
-        throw new Error("INSUFFICIENT_OCR_CREDITS");
-      }
-      throw err;
-    }
 
     const claim = await ClaimModel.findOne({
       where: { id: params.claimId, organizationId: params.organizationId },
@@ -147,6 +148,23 @@ export class ClaimsService {
         { claimId: claim.id, extractionJobId: extractionJob.id },
         transaction,
       );
+
+      try {
+        await reserveOcrCredits(
+          {
+            organizationId: params.organizationId,
+            claimId: claim.id,
+            extractionJobId: extractionJob.id,
+            credits: 1,
+          },
+          transaction,
+        );
+      } catch (err) {
+        if (err instanceof InsufficientOcrCreditsError) {
+          throw new Error("INSUFFICIENT_OCR_CREDITS");
+        }
+        throw err;
+      }
 
       return extractionJob;
     });

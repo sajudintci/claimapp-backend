@@ -137,14 +137,26 @@ Retry BullMQ: **3 attempts**, backoff exponential 3s.
    - Multipart: `Model` = string JSON `{"files":[{}]}`
    - `Files` = blob PDF/image + **nama file asli** (`originalName`)
 3. **Poll** — `GET /transactions/{id}` sampai `status === Processed` (interval `ABBYY_POLL_INTERVAL_MS`, timeout `ABBYY_TRANSACTION_TIMEOUT_MS`).
-4. **Download** — `GET /transactions/{id}/files/{fileId}/download` untuk setiap `resultFiles` (biasanya `OcrJson`).
+4. **Download** — `GET /transactions/{id}/files/{fileId}/download` untuk setiap `resultFiles`. Skill OCR baru mengembalikan **dua** file: `type: "OcrJson"` dan `type: "Text"`.
 
-### Konversi hasil → teks
+### Konversi hasil → teks (dual-file)
 
 `src/modules/extraction/application/vantage-result-to-text.ts`
 
-- Prioritas: file JSON (`OcrJson`) → `preprocessAbbyyOcrJson()` di `ocr-preprocess.ts`.
-- Fallback: file plain text dari ABBYY, atau body mentah jika bukan layout ABBYY.
+Poll `Processed` sekarang sering mengembalikan dua `resultFiles`:
+
+| `type` | Peran |
+|--------|--------|
+| `OcrJson` | Layout + bounding box `(l,t,r,b)` untuk `ocrPageLines` / PDF highlight |
+| `Text` | Plain text siap pakai → **langsung ke LLM** tanpa reformat |
+
+Alur di `abbyyResultsToOcrText()`:
+
+1. **Keduanya ada** → `combineAbbyyTextAndLayout()`: teks LLM dari file **Text**; posisi dari **OcrJson** via `filterOcrJson()` (bukan `prepareForLLM()`).
+2. **Hanya OcrJson** (skill lama) → `preprocessAbbyyOcrJson()` + `prepareForLLM()` seperti sebelumnya.
+3. **Hanya Text** → plain text fallback; tanpa layout/regions.
+
+Nomor halaman di layout mengikuti **indeks OcrJson** (`layout.pages[0]` → page `1`, …), bukan angka mentah dari marker Text `(Page 8 of 13)`.
 
 ### Preprocess OCR (`ocr-preprocess.ts`)
 
@@ -152,19 +164,19 @@ Tujuan: **tidak mengirim raw JSON ABBYY (~80k baris) ke LLM**.
 
 | Fungsi | Peran |
 |--------|------|
-| `filterOcrJson()` | Parse ABBYY layout → per-page `lines`, `rows`, `pairs`, `tables` (`ocr-layout.ts`) |
-| `extractFields()` | Regex pada baris + row + pair (policy, claim, patient, dates, total) |
-| `validateOutput()` | `value` harus substring dari `source_text`, else `not_found` |
-| `prepareForLLM()` | Teks per halaman dari rows/tables, cap `LLM_OCR_MAX_CHARS` |
+| `filterOcrJson()` | Parse ABBYY layout → per-page blocks dengan `region` (l,t,r,b); page = indeks layout 1-based |
+| `combineAbbyyTextAndLayout()` | Dual-file: Text → LLM, OcrJson → `pages` untuk highlight |
+| `splitAbbyyPlainTextByPage()` | Split file Text pada marker `(Page N of M)` → indeks urut 1, 2, 3… |
+| `prepareForLLM()` | Fallback OcrJson-only: visual rows + cap `LLM_OCR_MAX_CHARS` |
+| `preprocessAbbyyOcrJson()` | OcrJson-only entry point (memanggil `prepareForLLM`) |
 
-Output ke worker:
+Output ke worker (dual-file):
 
 | Field | Keterangan |
 |-------|------------|
-| `text` | String untuk LLM (hints + filtered OCR) |
-| `filteredPlainText` | Teks OCR bersih tanpa header hints |
-| `preExtracted` | 7 field traced untuk UI / payload |
-| `ocrFiltered` | `true` jika preprocess ABBYY berhasil |
+| `text` / `filteredPlainText` | Isi file **Text** (normalisasi whitespace ringan) |
+| `llmPrepared.pages` | Blocks + regions dari **OcrJson** |
+| `ocrFiltered` | `true` jika layout OcrJson tersedia |
 | `abbyyTransactionId` | ID transaksi Vantage |
 
 ### Gate OCR
@@ -412,6 +424,16 @@ Setelah JSON LLM dinormalisasi, setiap field **divalidasi terhadap korpus OCR** 
 - Line item / lab tanpa jejak di OCR dihapus.
 
 Payload menyimpan `extractionVerification`: `{ fieldsChecked, fieldsRejected, fieldsRepairedFromOcr, rejectedPaths, ... }`.
+
+### Trace & highlight dari OcrJson (`attach-ocr-block-regions.ts`)
+
+Setelah verifikasi OCR, **`attachOcrBlockRegions`** (bukan text enrich) menempelkan `traces[]` + `region` ke setiap field:
+
+- Query pencarian: **`value` LLM dulu**, `source_text` hanya jika pendek/relevan (menghindari match block salah dari baris panjang).
+- Semua block OcrJson yang match (multi-page) → `discoverOcrBlocksForValue`.
+- Line items / tests: `field_traces` per kolom + `traces` ringkasan dari description / test_name.
+
+Jika `ocrPages` kosong (tanpa OcrJson), field tetap tanpa `region`.
 
 **Catatan:** Akurasi 100% mutlak dari model saja tidak realistis; sistem ini menolak tebakan yang tidak ada di OCR daripada menampilkan nilai salah.
 

@@ -37,12 +37,13 @@ const envSchema = z.object({
   S3_KEY_PREFIX: z.string().default("claimora"),
   S3_UPLOAD_PREFIX: z.string().default("uploads"),
   S3_AVATAR_PREFIX: z.string().default("avatars"),
+  S3_LOGO_PREFIX: z.string().default("logos"),
   S3_PROCESSED_PREFIX: z.string().default("processed"),
   S3_PUBLIC_BASE_URL: z.string().optional(),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60000),
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   ENABLE_LLM_POST_PROCESS: z.string().default("false"),
-  /** When true, fill missing medical_summary/diagnosis from structured line items & labs (LLM + fallback). */
+  /** When true, fill missing Diagnosis + Medical summary only (after OCR region attachment). */
   ENABLE_CLINICAL_FIELD_SYNTHESIS: z.string().default("true"),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default("gpt-4o-mini"),
@@ -65,6 +66,8 @@ const envSchema = z.object({
   ABBYY_POLL_INTERVAL_MS: z.coerce.number().default(2000),
   ABBYY_TRANSACTION_TIMEOUT_MS: z.coerce.number().default(300000),
   OCR_CREDITS_MONTHLY_QUOTA: z.coerce.number().default(16000),
+  /** Notify the organization when remaining OCR credits fall at or below this value. */
+  OCR_LOW_CREDITS_NOTIFICATION_THRESHOLD: z.coerce.number().default(50),
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().default(2000),
   OUTBOX_BATCH_SIZE: z.coerce.number().default(25),
   OUTBOX_MAX_PUBLISH_ATTEMPTS: z.coerce.number().default(10),
@@ -88,6 +91,22 @@ const envSchema = z.object({
   BULKHEAD_OPENAI_MAX_WAITING: z.coerce.number().default(20),
   BULKHEAD_OPENAI_ACQUIRE_TIMEOUT_MS: z.coerce.number().default(120000),
   BULKHEAD_EXTRACTION_WORKER_CONCURRENCY: z.coerce.number().default(2),
+  /** When false, this process does not run the BullMQ extraction worker (API-only replica). */
+  RUN_EXTRACTION_WORKER: z
+    .string()
+    .default("true")
+    .transform((v) => v.toLowerCase() === "true"),
+  /** When false, this process does not poll the transactional outbox relay. */
+  RUN_OUTBOX_RELAY: z
+    .string()
+    .default("true")
+    .transform((v) => v.toLowerCase() === "true"),
+  /** Enforce ABBYY/OpenAI concurrency limits cluster-wide via Redis (all replicas). */
+  CLUSTER_BULKHEAD_ENABLED: z
+    .string()
+    .default("true")
+    .transform((v) => v.toLowerCase() === "true"),
+  CLUSTER_BULKHEAD_KEY_PREFIX: z.string().default("claimora:semaphore"),
   LOG_DIR: z.string().default("./storage/logs"),
   LOG_SERVICE_NAME: z.string().default("claimora-backend"),
   LOG_LEVEL: z.enum(["error", "warn", "info", "debug"]).default("info"),

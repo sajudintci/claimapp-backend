@@ -1,21 +1,17 @@
 export const REVIEW_META_KEY = "_review";
 
 export type ClaimReviewMeta = {
-  reviewedFieldKeys: string[];
   updatedAt?: string;
 };
 
 export function parseClaimReviewMeta(
   payload: Record<string, unknown> | null | undefined,
 ): ClaimReviewMeta {
-  if (!payload) return { reviewedFieldKeys: [] };
+  if (!payload) return {};
   const raw = payload[REVIEW_META_KEY];
-  if (!raw || typeof raw !== "object") return { reviewedFieldKeys: [] };
+  if (!raw || typeof raw !== "object") return {};
   const meta = raw as ClaimReviewMeta;
   return {
-    reviewedFieldKeys: Array.isArray(meta.reviewedFieldKeys)
-      ? meta.reviewedFieldKeys.filter((key): key is string => typeof key === "string")
-      : [],
     updatedAt: typeof meta.updatedAt === "string" ? meta.updatedAt : undefined,
   };
 }

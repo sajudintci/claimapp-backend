@@ -1,5 +1,5 @@
 import bcrypt from "bcrypt";
-import { Op } from "sequelize";
+import { Op, type Transaction } from "sequelize";
 import { sequelize } from "@/database/sequelize";
 import { UserModel } from "@/database/models/user.model";
 import { DepartmentModel } from "@/database/models/department.model";
@@ -7,7 +7,7 @@ import { RoleModel } from "@/database/models/role.model";
 import { UserRoleModel } from "@/database/models/user-role.model";
 import { RefreshTokenModel } from "@/database/models/refresh-token.model";
 import { createId } from "@/utils/id";
-import { mapUserListItem } from "@/modules/identity-access/application/user-mapper";
+import { mapUserListItem, type UserListItemDto } from "@/modules/identity-access/application/user-mapper";
 import { getStorageService } from "@/storage/storage.factory";
 
 const AVATAR_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -47,17 +47,34 @@ export async function getUserFormOptions(organizationId: string) {
   };
 }
 
-async function assertEmailAvailable(email: string, excludeUserId?: string) {
-  const where: Record<string, unknown> = {
-    email: email.trim().toLowerCase(),
-  };
-  if (excludeUserId) {
-    where.id = { [Op.ne]: excludeUserId };
-  }
-  const existing = await UserModel.findOne({ where });
+async function assertEmailAvailableForCreate(email: string, organizationId: string) {
+  const normalized = email.trim().toLowerCase();
+  const existing = await UserModel.findOne({ where: { email: normalized } });
+  if (!existing) return;
+  if (existing.organizationId === organizationId && !existing.isActive) return;
+  throw new Error("EMAIL_ALREADY_EXISTS");
+}
+
+async function assertEmailAvailableForUpdate(email: string, excludeUserId: string) {
+  const existing = await UserModel.findOne({
+    where: {
+      email: email.trim().toLowerCase(),
+      id: { [Op.ne]: excludeUserId },
+    },
+  });
   if (existing) {
     throw new Error("EMAIL_ALREADY_EXISTS");
   }
+}
+
+async function findInactiveUserByEmailInOrg(email: string, organizationId: string) {
+  return UserModel.findOne({
+    where: {
+      email: email.trim().toLowerCase(),
+      organizationId,
+      isActive: false,
+    },
+  });
 }
 
 async function assertDepartmentInOrg(departmentId: string | null | undefined, organizationId: string) {
@@ -71,24 +88,26 @@ async function assertDepartmentInOrg(departmentId: string | null | undefined, or
 }
 
 async function assertRolesExist(roleIds: string[]) {
-  if (!roleIds.length) {
-    throw new Error("ROLE_REQUIRED");
-  }
+  if (roleIds.length === 0) return;
   const roles = await RoleModel.findAll({ where: { id: roleIds } });
   if (roles.length !== roleIds.length) {
     throw new Error("ROLE_NOT_FOUND");
   }
 }
 
-async function assignRoles(userId: string, roleIds: string[]) {
-  await UserRoleModel.destroy({ where: { userId } });
+async function replaceUserRoles(userId: string, roleIds: string[], transaction?: Transaction) {
+  // Hard-delete junction rows: soft-delete leaves unique (userId, roleId) conflicts on re-insert.
+  await UserRoleModel.destroy({ where: { userId }, force: true, transaction });
   for (const roleId of roleIds) {
-    await UserRoleModel.create({
-      id: createId(),
-      userId,
-      roleId,
-    } as never);
+    await UserRoleModel.create(
+      { id: createId(), userId, roleId } as never,
+      { transaction },
+    );
   }
+}
+
+async function assignRoles(userId: string, roleIds: string[]) {
+  await replaceUserRoles(userId, roleIds);
 }
 
 export async function createOrganizationUser(params: {
@@ -97,12 +116,29 @@ export async function createOrganizationUser(params: {
   email: string;
   password: string;
   departmentId?: string | null;
-  roleIds: string[];
-}) {
+  roleIds?: string[];
+}): Promise<{ user: UserListItemDto; reactivated: boolean }> {
   const email = params.email.trim().toLowerCase();
-  await assertEmailAvailable(email);
+  const roleIds = params.roleIds ?? [];
   await assertDepartmentInOrg(params.departmentId, params.organizationId);
-  await assertRolesExist(params.roleIds);
+  await assertRolesExist(roleIds);
+
+  const inactive = await findInactiveUserByEmailInOrg(email, params.organizationId);
+  if (inactive) {
+    const user = await updateOrganizationUser({
+      organizationId: params.organizationId,
+      userId: inactive.id,
+      name: params.name,
+      email,
+      password: params.password,
+      departmentId: params.departmentId ?? null,
+      roleIds,
+      isActive: true,
+    });
+    return { user, reactivated: true };
+  }
+
+  await assertEmailAvailableForCreate(email, params.organizationId);
 
   const passwordHash = await bcrypt.hash(params.password, 10);
   const userId = createId();
@@ -120,18 +156,12 @@ export async function createOrganizationUser(params: {
       } as never,
       { transaction },
     );
-    await UserRoleModel.destroy({ where: { userId }, transaction });
-    for (const roleId of params.roleIds) {
-      await UserRoleModel.create(
-        { id: createId(), userId, roleId } as never,
-        { transaction },
-      );
-    }
+    await replaceUserRoles(userId, roleIds, transaction);
   });
 
   const user = await loadUserForOrg(userId, params.organizationId);
   if (!user) throw new Error("USER_CREATE_FAILED");
-  return mapUserListItem(user);
+  return { user: mapUserListItem(user), reactivated: false };
 }
 
 export async function updateOrganizationUser(params: {
@@ -150,12 +180,12 @@ export async function updateOrganizationUser(params: {
   }
 
   if (params.email) {
-    await assertEmailAvailable(params.email, params.userId);
+    await assertEmailAvailableForUpdate(params.email, params.userId);
   }
   if (params.departmentId !== undefined) {
     await assertDepartmentInOrg(params.departmentId, params.organizationId);
   }
-  if (params.roleIds) {
+  if (params.roleIds !== undefined) {
     await assertRolesExist(params.roleIds);
   }
 
@@ -177,14 +207,8 @@ export async function updateOrganizationUser(params: {
       });
     }
 
-    if (params.roleIds) {
-      await UserRoleModel.destroy({ where: { userId: params.userId }, transaction });
-      for (const roleId of params.roleIds) {
-        await UserRoleModel.create(
-          { id: createId(), userId: params.userId, roleId } as never,
-          { transaction },
-        );
-      }
+    if (params.roleIds !== undefined) {
+      await replaceUserRoles(params.userId, params.roleIds, transaction);
     }
   });
 

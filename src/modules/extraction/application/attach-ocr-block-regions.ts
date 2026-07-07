@@ -1,14 +1,11 @@
 import {
   discoverOcrBlocksForValue,
   findOcrBlockForSnippet,
+  isMonetaryQuery,
   type OcrBlockMatch,
 } from "@/modules/extraction/application/resolve-ocr-block";
 import type { OcrPagePayload } from "@/modules/extraction/application/ocr-preprocess";
-import {
-  attachTracesToField,
-  mergeTraceLists,
-  tracesFromField,
-} from "@/modules/extraction/domain/field-trace";
+import { mergeTraceLists } from "@/modules/extraction/domain/field-trace";
 import type {
   ExtractionClaim,
   ExtractionLineItem,
@@ -32,18 +29,6 @@ function toFieldTrace(match: OcrBlockMatch): FieldTrace {
   };
 }
 
-function sourceTextsAlign(a: string, b: string): boolean {
-  const left = a.trim().toLowerCase();
-  const right = b.trim().toLowerCase();
-  if (!left || !right) return false;
-  if (left === right) return true;
-  return left.includes(right) || right.includes(left);
-}
-
-function isMonetaryQuery(query: string): boolean {
-  return /^\d[\d.,\s]*$/.test(query.replace(/\s/g, ""));
-}
-
 function mergeDiscoveredMatches(...groups: OcrBlockMatch[][]): OcrBlockMatch[] {
   const seen = new Set<string>();
   const out: OcrBlockMatch[] = [];
@@ -63,33 +48,21 @@ function mergeDiscoveredMatches(...groups: OcrBlockMatch[][]): OcrBlockMatch[] {
 
   return out.sort((a, b) => {
     if (a.page !== b.page) return a.page - b.page;
+    if (b.score !== a.score) return b.score - a.score;
     return (a.region?.t ?? 0) - (b.region?.t ?? 0);
   });
 }
 
-function mergeTracesWithOcrRegions(
-  existing: FieldTrace[],
-  discovered: OcrBlockMatch[],
-): FieldTrace[] {
-  const pool = [...existing];
-
-  for (const match of discovered) {
-    const resolved = toFieldTrace(match);
-    const regionTarget = pool.findIndex(
-      (trace) =>
-        trace.page === resolved.page &&
-        !trace.region &&
-        resolved.region != null &&
-        sourceTextsAlign(trace.source_text, resolved.source_text),
-    );
-    if (regionTarget >= 0) {
-      pool[regionTarget] = { ...pool[regionTarget]!, region: resolved.region };
-      continue;
-    }
-    pool.push(resolved);
+/** Search OcrJson using LLM field value; fall back to source_text only when value is absent. */
+export function buildFieldQueries(field: TracedField): string[] {
+  const value = String(field.value).trim();
+  if (value !== "not_found" && value.length >= 2) {
+    return [value];
   }
 
-  return mergeTraceLists(pool);
+  const source = field.source_text.trim();
+  if (source.length >= 2) return [source];
+  return [];
 }
 
 function discoverMatchesForQueries(
@@ -116,22 +89,18 @@ function attachRegionToTracedField(
 ): TracedField {
   if (field.value === "not_found") return field;
 
-  const queries = [field.source_text.trim(), String(field.value).trim()].filter(
-    (q) => q.length >= 2,
-  );
-  const uniqueQueries = [...new Set(queries)];
-  const existing = tracesFromField(field);
-  const discovered = discoverMatchesForQueries(pages, uniqueQueries);
-  const traces = mergeTracesWithOcrRegions(existing, discovered);
-  if (traces.length === 0) return field;
+  const discovered = discoverMatchesForQueries(pages, buildFieldQueries(field));
+  if (discovered.length === 0) return field;
 
+  const traces = mergeTraceLists(discovered.map(toFieldTrace));
   const primary = traces[0]!;
-  return attachTracesToField({
+
+  return {
     ...field,
-    source_text: field.source_text.trim() || primary.source_text,
-    page: field.page ?? primary.page,
+    source_text: primary.source_text,
+    page: primary.page,
     traces,
-  });
+  };
 }
 
 function resolveLineItemFieldTraces(
@@ -140,7 +109,7 @@ function resolveLineItemFieldTraces(
   options?: { preferRightmost?: boolean; rowAnchor?: OcrBlockMatch["region"] },
 ): FieldTrace[] {
   const trimmed = value.trim();
-  if (!trimmed) return [];
+  if (!trimmed || trimmed === "not_found") return [];
   return discoverMatchesForQueries(pages, [trimmed], options).map(toFieldTrace);
 }
 
@@ -179,7 +148,21 @@ function enrichLineItemFieldTraces(
   if (doctorTraces.length > 0) field_traces.related_doctor = doctorTraces;
 
   if (Object.keys(field_traces).length === 0) return item;
-  return { ...item, field_traces };
+
+  const descriptionTraces = field_traces.description ?? [];
+  const primaryDesc = descriptionTraces[0];
+
+  return {
+    ...item,
+    field_traces,
+    ...(descriptionTraces.length > 0
+      ? {
+          traces: descriptionTraces,
+          source_text: item.source_text.trim() || primaryDesc!.source_text,
+          page: primaryDesc!.page ?? item.page,
+        }
+      : {}),
+  };
 }
 
 function enrichTestFieldTraces(
@@ -194,7 +177,21 @@ function enrichTestFieldTraces(
   }
 
   if (Object.keys(field_traces).length === 0) return test;
-  return { ...test, field_traces };
+
+  const nameTraces = field_traces.test_name ?? [];
+  const primaryName = nameTraces[0];
+
+  return {
+    ...test,
+    field_traces,
+    ...(nameTraces.length > 0
+      ? {
+          traces: nameTraces,
+          source_text: test.source_text.trim() || primaryName!.source_text,
+          page: primaryName!.page ?? test.page,
+        }
+      : {}),
+  };
 }
 
 function enrichClaim(claim: ExtractionClaim, pages: OcrPagePayload[]): ExtractionClaim {

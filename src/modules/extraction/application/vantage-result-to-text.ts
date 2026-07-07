@@ -1,4 +1,5 @@
 import {
+  combineAbbyyTextAndLayout,
   LlmPreparedInput,
   preprocessAbbyyOcrJson,
 } from "@/modules/extraction/application/ocr-preprocess";
@@ -13,12 +14,54 @@ export type AbbyyOcrTextResult = {
   llmPrepared?: LlmPreparedInput;
 };
 
+type RawResultFile = AbbyyProcessResult["rawResults"][number];
+
 function normalizePlainText(text: string): string {
-  return text.replace(/\n{3,}/g, "\n\n").trim();
+  return text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function fallbackPlainTextFromBody(body: string): string {
-  return normalizePlainText(body.trim());
+function findResultFile(
+  rawResults: RawResultFile[],
+  typeName: string,
+): RawResultFile | undefined {
+  const needle = typeName.toLowerCase();
+  const byType = rawResults.find((file) => (file.type ?? "").toLowerCase() === needle);
+  if (byType) return byType;
+
+  if (needle === "ocrjson") {
+    return rawResults.find((file) => {
+      const type = (file.type ?? "").toLowerCase();
+      const ct = file.contentType.toLowerCase();
+      return type.includes("json") || type.includes("ocrjson") || ct.includes("json");
+    });
+  }
+
+  if (needle === "text") {
+    return rawResults.find((file) => {
+      const type = (file.type ?? "").toLowerCase();
+      const ct = file.contentType.toLowerCase();
+      if (type === "ocrjson" || type.includes("json") || ct.includes("json")) return false;
+      return (
+        type === "text" ||
+        type.includes("txt") ||
+        ct.includes("text/plain") ||
+        (ct.includes("text/") && !ct.includes("json"))
+      );
+    });
+  }
+
+  return undefined;
+}
+
+function resultFromLlmPrepared(prepared: LlmPreparedInput, useFormattedOcrText: boolean): AbbyyOcrTextResult {
+  return {
+    text: useFormattedOcrText ? prepared.ocrText : prepared.filteredPlainText,
+    ocrPageCount: prepared.pageCount,
+    ocrFiltered: true,
+    filteredPlainText: prepared.filteredPlainText,
+    filteredCharCount: prepared.filteredCharCount,
+    llmPrepared: prepared,
+  };
 }
 
 function tryPreprocessJsonBody(body: string): AbbyyOcrTextResult | null {
@@ -26,51 +69,34 @@ function tryPreprocessJsonBody(body: string): AbbyyOcrTextResult | null {
     const parsed = JSON.parse(body) as unknown;
     const prepared = preprocessAbbyyOcrJson(parsed);
     if (!prepared) return null;
-
-    return {
-      text: prepared.ocrText,
-      ocrPageCount: prepared.pageCount,
-      ocrFiltered: true,
-      filteredPlainText: prepared.filteredPlainText,
-      filteredCharCount: prepared.filteredCharCount,
-      llmPrepared: prepared,
-    };
+    return resultFromLlmPrepared(prepared, true);
   } catch {
     return null;
   }
 }
 
-export function abbyyResultsToOcrText(result: AbbyyProcessResult): AbbyyOcrTextResult {
-  const jsonFiles = result.rawResults.filter((file) => {
-    const type = (file.type ?? "").toLowerCase();
-    const ct = file.contentType.toLowerCase();
-    return type.includes("json") || ct.includes("json");
-  });
-
-  for (const file of jsonFiles) {
-    const preprocessed = tryPreprocessJsonBody(file.body);
-    if (preprocessed) return preprocessed;
+function tryCombineDualFiles(ocrJsonFile: RawResultFile, textFile: RawResultFile): AbbyyOcrTextResult | null {
+  try {
+    const parsed = JSON.parse(ocrJsonFile.body) as unknown;
+    const prepared = combineAbbyyTextAndLayout(textFile.body, parsed);
+    if (!prepared) return null;
+    return resultFromLlmPrepared(prepared, false);
+  } catch {
+    return null;
   }
+}
 
-  const textFiles = result.rawResults.filter((file) => {
-    const type = (file.type ?? "").toLowerCase();
-    const ct = file.contentType.toLowerCase();
-    return (
-      type.includes("text") ||
-      type.includes("txt") ||
-      ct.includes("text/plain") ||
-      (ct.includes("text/") && !ct.includes("json"))
-    );
-  });
-
+function buildTextOnlyResult(rawResults: RawResultFile[]): AbbyyOcrTextResult {
+  const textFile = findResultFile(rawResults, "Text");
   const chunks: string[] = [];
-  for (const file of textFiles) {
-    const trimmed = file.body.trim();
-    if (trimmed) chunks.push(trimmed);
-  }
 
-  if (chunks.length === 0) {
-    for (const file of result.rawResults) {
+  if (textFile?.body.trim()) {
+    chunks.push(textFile.body.trim());
+  } else {
+    for (const file of rawResults) {
+      const type = (file.type ?? "").toLowerCase();
+      const ct = file.contentType.toLowerCase();
+      if (type.includes("json") || ct.includes("json")) continue;
       const trimmed = file.body.trim();
       if (trimmed) chunks.push(trimmed);
     }
@@ -78,12 +104,31 @@ export function abbyyResultsToOcrText(result: AbbyyProcessResult): AbbyyOcrTextR
 
   const text = normalizePlainText(chunks.join("\n\n"));
   let ocrPageCount: number | undefined;
-  const pageMarkers = text.match(/---\s*Page\s+\d+\s*---/gi);
-  if (pageMarkers) ocrPageCount = pageMarkers.length;
+  const legacyMarkers = text.match(/---\s*Page\s+\d+\s*---/gi);
+  const abbyyMarkers = text.match(/\(\s*Page\s+\d+[^)]*of\s+\d+\s*\)/gi);
+  if (abbyyMarkers) ocrPageCount = abbyyMarkers.length;
+  else if (legacyMarkers) ocrPageCount = legacyMarkers.length;
 
   return {
     text,
     ocrPageCount,
     ocrFiltered: false,
   };
+}
+
+export function abbyyResultsToOcrText(result: AbbyyProcessResult): AbbyyOcrTextResult {
+  const ocrJsonFile = findResultFile(result.rawResults, "OcrJson");
+  const textFile = findResultFile(result.rawResults, "Text");
+
+  if (ocrJsonFile && textFile) {
+    const combined = tryCombineDualFiles(ocrJsonFile, textFile);
+    if (combined) return combined;
+  }
+
+  if (ocrJsonFile) {
+    const jsonOnly = tryPreprocessJsonBody(ocrJsonFile.body);
+    if (jsonOnly) return jsonOnly;
+  }
+
+  return buildTextOnlyResult(result.rawResults);
 }

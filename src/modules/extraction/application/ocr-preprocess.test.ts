@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  combineAbbyyTextAndLayout,
   filterOcrJson,
   prepareForLLM,
   preprocessAbbyyOcrJson,
+  splitAbbyyPlainTextByPage,
 } from "./ocr-preprocess";
 
 describe("filterOcrJson", () => {
@@ -46,6 +48,51 @@ describe("filterOcrJson", () => {
     expect(filtered.pages[0]!.blocks).toHaveLength(2);
     expect(filtered.pages[0]!.blocks[0]!.confidence).toBe(90);
     expect(filtered.pages[0]!.blocks[1]!.confidence).toBe(88);
+  });
+
+  it("uses OcrJson layout index for page numbers", () => {
+    const filtered = filterOcrJson({
+      layout: {
+        pages: [
+          {
+            texts: [
+              {
+                lines: [
+                  {
+                    text: "(Page 8 of 13)",
+                    confidence: 55,
+                    position: { l: 24, t: 40, r: 206, b: 75 },
+                  },
+                  {
+                    text: "PAYMENT RECEIPT",
+                    confidence: 90,
+                    position: { l: 100, t: 100, r: 300, b: 130 },
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            texts: [
+              {
+                lines: [
+                  {
+                    text: "(Page 9 of 13)",
+                    confidence: 55,
+                    position: { l: 24, t: 40, r: 206, b: 75 },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(filtered.pages[0]!.page).toBe(1);
+    expect(filtered.pages[1]!.page).toBe(2);
+    expect(filtered.allLines[0]!.page).toBe(1);
+    expect(filtered.allLines.find((line) => line.text === "PAYMENT RECEIPT")?.page).toBe(1);
   });
 
   it("splits merged table cell lines into word boxes for precise highlights", () => {
@@ -129,13 +176,13 @@ describe("prepareForLLM", () => {
     });
 
     const prepared = prepareForLLM(filtered, 8000);
-    expect(prepared.ocrText).toContain("=== STRUCTURED OCR BLOCKS");
+    expect(prepared.ocrText).toContain("=== OCR TEXT (visual rows");
     expect(prepared.ocrText).not.toContain("PRE-EXTRACTED");
     expect(prepared.ocrText).not.toContain("LAYOUT PAIRS");
     expect(prepared.ocrText).toContain("Martha Friska Hospital");
-    expect(prepared.ocrText).toContain("(confidence=95, source=text)");
+    expect(prepared.ocrText).not.toContain("confidence=95, source=text");
     expect(prepared.ocrText).not.toMatch(/confidence=0\.\d+/);
-    expect(prepared.ocrText).toContain("=== FILTERED OCR TEXT");
+    expect(prepared.ocrText).toContain("=== OCR TEXT REPEATED");
     expect(prepared.pages).toHaveLength(1);
     expect(prepared.chunks[0]!.text).toContain("--- Page 1 ---");
   });
@@ -191,5 +238,72 @@ describe("preprocessAbbyyOcrJson", () => {
       },
     });
     expect(filtered.pages[0]!.blocks[0]!.confidence).toBe(0);
+  });
+});
+
+describe("splitAbbyyPlainTextByPage", () => {
+  it("splits ABBYY Text output by page markers", () => {
+    const pages = splitAbbyyPlainTextByPage(
+      "(Page 8 of 13)\nPAYMENT RECEIPT\n\n(Page 9 of 13)\nTagihan Pasien",
+    );
+
+    expect(pages).toEqual([
+      { page: 1, text: "PAYMENT RECEIPT" },
+      { page: 2, text: "Tagihan Pasien" },
+    ]);
+  });
+
+  it("tolerates OCR typos in page markers", () => {
+    const pages = splitAbbyyPlainTextByPage("(Page 10' of 13)\nLine A\n(Page 11' of 13)\nLine B");
+    expect(pages.map((page) => page.page)).toEqual([1, 2]);
+  });
+});
+
+describe("combineAbbyyTextAndLayout", () => {
+  const layoutJson = {
+    layout: {
+      pages: [
+        {
+          texts: [
+            {
+              lines: [
+                {
+                  text: "(Page 8 of 13)",
+                  confidence: 55,
+                  position: { l: 24, t: 40, r: 206, b: 75 },
+                },
+                {
+                  text: "PAYMENT RECEIPT",
+                  confidence: 90,
+                  position: { l: 100, t: 100, r: 300, b: 130 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  it("uses Text file body for LLM without prepareForLLM headers", () => {
+    const plainText = "(Page 8 of 13)\nPAYMENT RECEIPT\nNama Pasien";
+    const prepared = combineAbbyyTextAndLayout(plainText, layoutJson, 8000);
+
+    expect(prepared).not.toBeNull();
+    expect(prepared!.filteredPlainText).toBe(plainText);
+    expect(prepared!.ocrText).toBe(plainText);
+    expect(prepared!.ocrText).not.toContain("=== OCR TEXT");
+    expect(prepared!.pages[0]!.page).toBe(1);
+    expect(prepared!.pages[0]!.blocks.find((block) => block.text === "PAYMENT RECEIPT")?.region).toEqual({
+      l: 100,
+      t: 100,
+      r: 300,
+      b: 130,
+    });
+    expect(prepared!.chunks).toEqual([{ page: 1, text: "PAYMENT RECEIPT\nNama Pasien" }]);
+  });
+
+  it("returns null when layout has no pages", () => {
+    expect(combineAbbyyTextAndLayout("hello", { layout: { pages: [] } })).toBeNull();
   });
 });

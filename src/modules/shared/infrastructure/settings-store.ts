@@ -17,6 +17,7 @@ const byOrg = new Map<string, SettingsPayload>();
 export type OrganizationSettings = SettingsPayload & {
   organizationName: string;
   organizationCode: string;
+  organizationLogoUrl: string | null;
   ocrCreditsRemaining: number;
   ocrMonthlyQuota: number;
   ocrCreditsUsedThisMonth: number;

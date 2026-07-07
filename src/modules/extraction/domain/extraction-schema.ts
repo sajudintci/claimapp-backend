@@ -14,9 +14,9 @@ export type TracedField = {
   confidence: number;
   /** Additional OCR snippets when a value is supported by multiple pages. */
   traces?: FieldTrace[];
-  /** @deprecated Legacy extractions may still store synthesis metadata; no longer written. */
+  /** Set only for LLM-synthesized Diagnosis / Medical summary fields. */
   value_origin?: FieldValueOrigin;
-  /** @deprecated Legacy extractions may still store synthesis metadata; no longer written. */
+  /** Structured paths used when value_origin is llm_synthesis. */
   derived_from?: string[];
 };
 

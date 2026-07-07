@@ -53,6 +53,10 @@ export class S3StorageService implements StorageService {
     return this.uploadKey(env.S3_AVATAR_PREFIX, fileName);
   }
 
+  private logoKey(fileName: string): string {
+    return this.uploadKey(env.S3_LOGO_PREFIX, fileName);
+  }
+
   async saveUpload(file: Express.Multer.File): Promise<StorageObjectRef> {
     const ext = file.originalname.includes(".")
       ? file.originalname.slice(file.originalname.lastIndexOf("."))
@@ -91,12 +95,41 @@ export class S3StorageService implements StorageService {
     return { path: toS3StorageRef(key), fileName };
   }
 
+  async saveLogo(file: Express.Multer.File): Promise<StorageObjectRef> {
+    const ext = file.originalname.includes(".")
+      ? file.originalname.slice(file.originalname.lastIndexOf(".")).toLowerCase()
+      : ".png";
+    const fileName = `${createId()}${ext}`;
+    const key = this.logoKey(fileName);
+
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: env.S3_BUCKET,
+        Key: key,
+        Body: file.buffer,
+        ContentType: file.mimetype,
+      }),
+    );
+
+    return { path: toS3StorageRef(key), fileName };
+  }
+
   async deleteAvatarFile(fileName: string): Promise<void> {
     if (!fileName || fileName.includes("..") || fileName.includes("/")) return;
     await this.client.send(
       new DeleteObjectCommand({
         Bucket: env.S3_BUCKET,
         Key: this.avatarKey(fileName),
+      }),
+    );
+  }
+
+  async deleteLogoFile(fileName: string): Promise<void> {
+    if (!fileName || fileName.includes("..") || fileName.includes("/")) return;
+    await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: env.S3_BUCKET,
+        Key: this.logoKey(fileName),
       }),
     );
   }
@@ -158,6 +191,14 @@ export class S3StorageService implements StorageService {
     return {
       stream,
       contentType: contentType ?? "image/jpeg",
+    };
+  }
+
+  async resolveLogoStream(fileName: string): Promise<{ stream: Readable; contentType: string }> {
+    const { stream, contentType } = await this.openReadStream(toS3StorageRef(this.logoKey(fileName)));
+    return {
+      stream,
+      contentType: contentType ?? "image/png",
     };
   }
 }

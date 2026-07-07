@@ -27,9 +27,28 @@ export class LocalStorageService implements StorageService {
     return { path: finalPath, fileName };
   }
 
+  async saveLogo(file: Express.Multer.File): Promise<StorageObjectRef> {
+    await fsPromises.mkdir(path.join(env.STORAGE_PATH, "logos"), { recursive: true });
+    const ext = path.extname(file.originalname).toLowerCase() || ".png";
+    const fileName = `${createId()}${ext}`;
+    const finalPath = path.join(env.STORAGE_PATH, "logos", fileName);
+    await fsPromises.writeFile(finalPath, file.buffer);
+    return { path: finalPath, fileName };
+  }
+
   async deleteAvatarFile(fileName: string): Promise<void> {
     if (!fileName || fileName.includes("..") || fileName.includes("/")) return;
     const target = path.join(env.STORAGE_PATH, "avatars", fileName);
+    try {
+      await fsPromises.unlink(target);
+    } catch {
+      // ignore missing file
+    }
+  }
+
+  async deleteLogoFile(fileName: string): Promise<void> {
+    if (!fileName || fileName.includes("..") || fileName.includes("/")) return;
+    const target = path.join(env.STORAGE_PATH, "logos", fileName);
     try {
       await fsPromises.unlink(target);
     } catch {
@@ -56,6 +75,14 @@ export class LocalStorageService implements StorageService {
 
   async resolveAvatarStream(fileName: string): Promise<{ stream: Readable; contentType: string }> {
     const target = path.join(env.STORAGE_PATH, "avatars", fileName);
+    const ext = path.extname(fileName).toLowerCase();
+    const contentType =
+      ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+    return { stream: fs.createReadStream(target), contentType };
+  }
+
+  async resolveLogoStream(fileName: string): Promise<{ stream: Readable; contentType: string }> {
+    const target = path.join(env.STORAGE_PATH, "logos", fileName);
     const ext = path.extname(fileName).toLowerCase();
     const contentType =
       ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";

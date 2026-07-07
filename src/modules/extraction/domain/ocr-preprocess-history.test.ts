@@ -8,7 +8,7 @@ import { OCR_FORMAT_SCHEMA_VERSION, type LlmPreparedInput } from "@/modules/extr
 describe("buildOcrPreprocessHistoryPayload", () => {
   it("captures LLM OCR payload and page summaries", () => {
     const prepared: LlmPreparedInput = {
-      ocrText: "=== STRUCTURED OCR BLOCKS ===\nNama Pasien",
+      ocrText: "=== OCR TEXT (visual rows by page) ===\nNama Pasien",
       filteredPlainText: "Nama Pasien",
       ocrCharCount: 120,
       filteredCharCount: 10,
@@ -33,7 +33,7 @@ describe("buildOcrPreprocessHistoryPayload", () => {
     const payload = buildOcrPreprocessHistoryPayload(prepared, OCR_FORMAT_SCHEMA_VERSION);
     expect(payload.schemaVersion).toBe(OCR_PREPROCESS_HISTORY_SCHEMA_VERSION);
     expect(payload.formatSchemaVersion).toBe(OCR_FORMAT_SCHEMA_VERSION);
-    expect(payload.ocrText).toContain("STRUCTURED OCR BLOCKS");
+    expect(payload.ocrText).toContain("OCR TEXT");
     expect(payload.pageSummaries).toEqual([{ page: 1, blockCount: 1, tableCount: 0 }]);
   });
 });

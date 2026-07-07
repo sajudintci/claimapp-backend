@@ -26,6 +26,10 @@ import { ensureClaimMetadataSchema } from "./migrations/ensure-claim-metadata-sc
 import { ensureClaimReviewerSchema } from "./migrations/ensure-claim-reviewer-schema";
 import { ensureExtractionJobProgressSchema } from "./migrations/ensure-extraction-job-progress-schema";
 import { ensureOcrPreprocessHistorySchema } from "./migrations/ensure-ocr-preprocess-history-schema";
+import { ensureNotificationsSchema } from "./migrations/ensure-notifications-schema";
+import { ensureOrganizationLogoSchema } from "./migrations/ensure-organization-logo-schema";
+import { ensureExtractionResultJobSchema } from "./migrations/ensure-extraction-result-job-schema";
+import { ensureOcrCreditHoldSchema } from "./migrations/ensure-ocr-credit-hold-schema";
 
 export const sequelize = new Sequelize(env.DATABASE_URL, {
   dialect: "postgres",
@@ -87,6 +91,10 @@ export async function initDatabase() {
   await ensureClaimMetadataSchema(sequelize);
   await ensureExtractionJobProgressSchema(sequelize);
   await ensureOcrPreprocessHistorySchema(sequelize);
+  await ensureNotificationsSchema(sequelize);
+  await ensureOrganizationLogoSchema(sequelize);
+  await ensureExtractionResultJobSchema(sequelize);
+  await ensureOcrCreditHoldSchema(sequelize);
   await sequelize.sync();
   await backfillOrganizationOcrCredits();
   logger.info("Database initialized");

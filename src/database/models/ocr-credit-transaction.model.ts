@@ -4,7 +4,7 @@ import { OrganizationModel } from "./organization.model";
 import { ClaimModel } from "./claim.model";
 import { ExtractionJobModel } from "./extraction-job.model";
 
-export type OcrCreditTransactionType = "debit" | "grant" | "adjustment";
+export type OcrCreditTransactionType = "debit" | "grant" | "adjustment" | "hold" | "release";
 
 @Table({ tableName: "ocr_credit_transactions" })
 export class OcrCreditTransactionModel extends BaseModel<OcrCreditTransactionModel> {

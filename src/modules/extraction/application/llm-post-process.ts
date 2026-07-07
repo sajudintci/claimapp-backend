@@ -6,6 +6,7 @@ import { CircuitBreakerOpenError } from "@/infrastructure/resilience/circuit-bre
 import { openaiCircuitBreaker } from "@/infrastructure/resilience/circuit-breakers";
 import { BulkheadRejectedError } from "@/infrastructure/resilience/bulkhead-rejected.error";
 import { openaiBulkhead } from "@/infrastructure/resilience/bulkheads";
+import { runWithBulkhead } from "@/infrastructure/resilience/cluster-bulkhead";
 import {
   buildSummaryFromClaims,
   computeAggregateConfidence,
@@ -16,7 +17,7 @@ import {
   LlmParseResult,
 } from "@/modules/extraction/application/llm-json-parse";
 import { attachOcrBlockRegions } from "@/modules/extraction/application/attach-ocr-block-regions";
-import { enrichExtractionResultTraces } from "@/modules/extraction/application/enrich-field-traces";
+import { synthesizeClinicalFieldsOnly } from "@/modules/extraction/application/clinical-field-synthesis";
 import type { OcrPagePayload } from "@/modules/extraction/application/ocr-preprocess";
 import { updateExtractionJobProgress } from "@/modules/extraction/application/extraction-job-progress";
 import {
@@ -360,7 +361,13 @@ async function callLlmOnce(params: {
 
   try {
     openaiCircuitBreaker.guard();
-    const response = await openaiBulkhead.run(() =>
+    const response = await runWithBulkhead(
+      openaiBulkhead,
+      {
+        acquireTimeoutMs: env.BULKHEAD_OPENAI_ACQUIRE_TIMEOUT_MS,
+        clusterTtlMs: env.LLM_REQUEST_TIMEOUT_MS,
+      },
+      () =>
       fetchWithTimeout(
         `${env.OPENAI_BASE_URL}/chat/completions`,
         {
@@ -569,17 +576,17 @@ export async function postProcessExtractionWithLlm(
       const verified = verifyAndRepairExtraction(outcome.result, {
         filteredPlainText: options?.filteredPlainText ?? rawText,
       });
-      const enriched = enrichExtractionResultTraces(
-        verified.result,
-        options?.filteredPlainText ?? rawText,
-      );
       const withRegions =
         options?.ocrPages && options.ocrPages.length > 0
-          ? attachOcrBlockRegions(enriched, options.ocrPages)
-          : enriched;
+          ? attachOcrBlockRegions(verified.result, options.ocrPages)
+          : verified.result;
+      const withClinicalFields = await synthesizeClinicalFieldsOnly(withRegions, {
+        ocrText: rawText,
+        filteredPlainText: options?.filteredPlainText ?? rawText,
+      });
       return {
         status: "ok",
-        result: withRegions,
+        result: withClinicalFields,
         verification: verified.stats,
         error: null,
         attempts: attempt,

@@ -6,14 +6,33 @@ import { createId } from "@/utils/id";
 const router = Router();
 router.use(authMiddleware);
 
-router.get("/", async (req, res) => {
-  const items = await NotificationModel.findAll({
-    where: { organizationId: req.auth?.org },
-    order: [["createdAt", "DESC"]],
-    limit: 50
-  });
+function parseNotificationLimit(raw: unknown): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return 50;
+  return Math.min(200, Math.max(1, Math.floor(parsed)));
+}
 
-  const unread = items.filter((n) => !n.isRead).length;
+router.get("/", async (req, res) => {
+  const organizationId = req.auth?.org;
+  const limit = parseNotificationLimit(req.query.limit);
+  const unreadOnly = req.query.unreadOnly === "true";
+
+  const where: Record<string, unknown> = { organizationId };
+  if (unreadOnly) {
+    where.isRead = false;
+  }
+
+  const [items, unread] = await Promise.all([
+    NotificationModel.findAll({
+      where,
+      order: [["createdAt", "DESC"]],
+      limit,
+    }),
+    NotificationModel.count({
+      where: { organizationId, isRead: false },
+    }),
+  ]);
+
   res.json({ unread, items });
 });
 

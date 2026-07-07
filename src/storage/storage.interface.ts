@@ -10,9 +10,12 @@ export interface StorageService {
   readonly driver: "local" | "s3";
   saveUpload(file: Express.Multer.File): Promise<StorageObjectRef>;
   saveAvatar(file: Express.Multer.File): Promise<StorageObjectRef>;
+  saveLogo(file: Express.Multer.File): Promise<StorageObjectRef>;
   deleteAvatarFile(fileName: string): Promise<void>;
+  deleteLogoFile(fileName: string): Promise<void>;
   moveToProcessed(storageRef: string): Promise<string>;
   readBuffer(storageRef: string): Promise<Buffer>;
   openReadStream(storageRef: string): Promise<{ stream: Readable; contentType?: string }>;
   resolveAvatarStream(fileName: string): Promise<{ stream: Readable; contentType: string }>;
+  resolveLogoStream(fileName: string): Promise<{ stream: Readable; contentType: string }>;
 }

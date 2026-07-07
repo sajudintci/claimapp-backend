@@ -32,7 +32,7 @@ const createUserSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8).max(128),
   departmentId: z.string().uuid().nullable().optional(),
-  roleIds: z.array(z.string().uuid()).min(1),
+  roleIds: z.array(z.string().uuid()).optional().default([]),
 });
 
 const updateUserSchema = z.object({
@@ -40,7 +40,7 @@ const updateUserSchema = z.object({
   email: z.string().email().optional(),
   password: z.string().min(8).max(128).optional(),
   departmentId: z.string().uuid().nullable().optional(),
-  roleIds: z.array(z.string().uuid()).min(1).optional(),
+  roleIds: z.array(z.string().uuid()).optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -257,31 +257,34 @@ router.get("/:id", async (req, res) => {
 
 router.post("/", validateBody(createUserSchema), async (req, res) => {
   try {
-    const created = await createOrganizationUser({
+    const { user: created, reactivated } = await createOrganizationUser({
       organizationId: req.auth!.org,
       name: req.body.name,
       email: req.body.email,
       password: req.body.password,
       departmentId: req.body.departmentId ?? null,
-      roleIds: req.body.roleIds,
+      roleIds: req.body.roleIds ?? [],
     });
 
     await writeAuditFromRequest(req, {
-      action: AuditAction.USER_CREATED,
+      action: reactivated ? AuditAction.USER_UPDATED : AuditAction.USER_CREATED,
       entityType: "user",
       entityId: created.id,
       afterChanges: {
         email: created.email,
         name: created.name,
         roles: created.roles,
+        reactivated,
         result: "Success",
       },
     });
 
-    return res.success(created, {
-      status: 201,
-      code: "DATA_CREATED",
-      message: "User created successfully",
+    return res.success({ ...created, reactivated }, {
+      status: reactivated ? 200 : 201,
+      code: reactivated ? "DATA_UPDATED" : "DATA_CREATED",
+      message: reactivated
+        ? "Inactive user reactivated with the new details"
+        : "User created successfully",
     });
   } catch (err) {
     return mapServiceError(res, err);
@@ -358,8 +361,8 @@ router.delete("/:id", async (req, res) => {
     });
 
     return res.success(null, {
-      code: "DATA_DELETED",
-      message: "User removed successfully",
+      code: "DATA_UPDATED",
+      message: "User deactivated successfully",
     });
   } catch (err) {
     return mapServiceError(res, err);

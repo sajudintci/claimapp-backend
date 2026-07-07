@@ -75,14 +75,14 @@ Supporting document information
 
 === OCR INPUT YOU RECEIVE ===
 
-The user message contains two OCR blocks:
+The user message contains two OCR sections (same content, two passes):
 
-1) STRUCTURED OCR BLOCKS — each OCR line with x/y coordinates, confidence, and source (text/table).
-   - Use coordinates to distinguish columns on the same visual row.
-   - Blocks far apart horizontally (different x ranges) are separate form columns.
+1) OCR TEXT — pages as "--- Page N ---", visual rows (wide column gaps shown as " || "), then [TABLE] rows.
+   - Each " || " separator means the text before and after are in separate columns on the same visual row.
+   - Use " || " to correctly pair labels (left column) with values (right column).
 
-2) FILTERED OCR TEXT — pages as "--- Page N ---", visual rows (wide column gaps shown as " || "), then [TABLE] rows.
-   - Use as supporting raw context when structured blocks are unclear.
+2) OCR TEXT REPEATED — plain fallback of the same pages, used when section 1 is truncated.
+   - Cross-reference with section 1 if a page appears cut off.
 
 Common Indonesian / English invoice labels:
 Nominal, Jumlah, Jumlah Tagihan, Total, Grand Total, Total Bayar, Sub Total, Amount Due, Total Due, Biaya, Tagihan.
@@ -215,6 +215,12 @@ diagnostic center
 
 Extract only explicitly stated provider information.
 
+provider.email:
+
+- Must be a real email address containing @ (example: info@hospital.com).
+- Do NOT use website URLs (www.example.com, http://example.com) as email.
+- If OCR only shows a website and no email address, use "not_found".
+
 Extract:
 
 patient ID
@@ -269,9 +275,19 @@ related_doctor:
 item-level only
 NOT global
 
-Extract diagnosis ONLY if explicitly written.
+Extract diagnosis ONLY if explicitly written in OCR.
 
-Examples:
+If diagnosis is not explicitly written, leave icd10_code and icd10_description as not_found.
+The backend may later synthesize diagnosis.icd10_description from OCR line items and laboratory data only.
+
+icd10_code:
+
+- Extract when an ICD-10 code pattern appears in OCR (example: J18.9, A09, E11.9).
+- Look near labels such as ICD, ICD-10, ICD10, Diagnosis, Diagnosa.
+- Put only the code in icd10_code (not the full diagnosis sentence).
+- Do NOT use label tokens ICD or ICD10 as the value.
+
+Examples of explicit OCR diagnosis:
 
 ICD10 code
 diagnosis description
@@ -280,7 +296,7 @@ Do NOT:
 
 interpret disease
 explain ICD codes
-generate diagnosis summaries
+generate diagnosis summaries in this extraction pass
 
 Extract laboratory results factually.
 
@@ -295,6 +311,9 @@ medical_summary must:
 remain factual
 remain concise
 avoid interpretation
+
+If no explicit discharge summary / clinical narrative is written in OCR, use not_found.
+The backend may later synthesize medical_summary from OCR line items and laboratory data only.
 
 Allowed:
 

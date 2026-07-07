@@ -13,6 +13,7 @@ import {
   isInvalidExtractedValue,
   type FieldLabelKind,
 } from "@/modules/extraction/domain/field-label-guard";
+import { repairIcd10CodeField } from "@/modules/extraction/application/icd10-code-repair";
 
 const NOT_FOUND: TracedField = {
   value: "not_found",
@@ -43,6 +44,15 @@ export function isValidMonetaryValue(value: string | number): boolean {
   if (!v || v === "not_found") return false;
   if (INVALID_VALUE_ONLY_PUNCT.test(v)) return false;
   return /\d/.test(v);
+}
+
+/** Rejects website URLs and values without a proper local@domain.tld shape. */
+export function isValidEmailValue(value: string | number): boolean {
+  const v = String(value).trim();
+  if (!v || v === "not_found") return false;
+  if (/^https?:\/\//i.test(v)) return false;
+  if (/^www\./i.test(v)) return false;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 
 function normalizeForMatch(text: string): string {
@@ -124,7 +134,12 @@ function valueSupportedByField(
 function verifyTracedField(
   field: TracedField,
   corpus: string,
-  opts: { monetary?: boolean; requireDate?: boolean; labelKind?: FieldLabelKind },
+  opts: {
+    monetary?: boolean;
+    requireDate?: boolean;
+    requireEmail?: boolean;
+    labelKind?: FieldLabelKind;
+  },
 ): TracedField {
   if (field.value === "not_found") return field;
 
@@ -134,6 +149,10 @@ function verifyTracedField(
   }
 
   if (opts.monetary && !isValidMonetaryValue(field.value)) {
+    return rejectField(field);
+  }
+
+  if (opts.requireEmail && !isValidEmailValue(field.value)) {
     return rejectField(field);
   }
 
@@ -227,6 +246,7 @@ function verifyClaim(
   claim: ExtractionClaim,
   corpus: string,
   stats?: ExtractionVerificationStats,
+  plainText?: string,
 ): ExtractionClaim {
   const track = (path: string, before: TracedField, after: TracedField) => {
     if (!stats) return;
@@ -283,7 +303,7 @@ function verifyClaim(
       address: applyPath("provider.address", claim.provider.address, {}),
       city: applyPath("provider.city", claim.provider.city, {}),
       phone: applyPath("provider.phone", claim.provider.phone, {}),
-      email: applyPath("provider.email", claim.provider.email, {}),
+      email: applyPath("provider.email", claim.provider.email, { requireEmail: true }),
     },
     billing,
     patient: {
@@ -301,14 +321,28 @@ function verifyClaim(
       }),
     },
     medical_summary: applyPath("medical_summary", claim.medical_summary, {}),
-    diagnosis: {
-      icd10_code: applyPath("diagnosis.icd10_code", claim.diagnosis.icd10_code, {}),
-      icd10_description: applyPath(
+    diagnosis: (() => {
+      const icd10_description = applyPath(
         "diagnosis.icd10_description",
         claim.diagnosis.icd10_description,
         {},
-      ),
-    },
+      );
+      let icd10_code = applyPath("diagnosis.icd10_code", claim.diagnosis.icd10_code, {});
+
+      if (icd10_code.value === "not_found" && plainText) {
+        const before = icd10_code;
+        icd10_code = repairIcd10CodeField(icd10_code, {
+          plainText,
+          descriptionField: icd10_description,
+        });
+        if (before.value === "not_found" && icd10_code.value !== "not_found" && stats) {
+          stats.fieldsRepairedFromOcr++;
+          stats.repairedPaths.push("diagnosis.icd10_code");
+        }
+      }
+
+      return { icd10_code, icd10_description };
+    })(),
     items,
     tests: claim.tests.map((t) => verifyTestResult(t, corpus)),
   };
@@ -331,11 +365,13 @@ export function verifyAndRepairExtraction(
     repairedPaths: [],
   };
 
-  const claims = result.claims.map((claim) => verifyClaim(claim, corpus, stats));
+  const claims = result.claims.map((claim) =>
+    verifyClaim(claim, corpus, stats, options.filteredPlainText),
+  );
 
   const confidence = computeAggregateConfidence(claims);
 
-  if (stats.fieldsRejected > 0) {
+  if (stats.fieldsRejected > 0 || stats.fieldsRepairedFromOcr > 0) {
     logger.info("Extraction OCR verification applied", {
       fieldsChecked: stats.fieldsChecked,
       fieldsRejected: stats.fieldsRejected,

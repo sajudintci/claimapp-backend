@@ -10,6 +10,9 @@ export class OrganizationModel extends BaseModel<OrganizationModel> {
   @Column(DataType.STRING)
   declare code: string;
 
+  @Column({ type: DataType.STRING, allowNull: true })
+  declare logoFileName: string | null;
+
   /** Remaining OCR credits (1 credit = 1 page). */
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 16000 })
   declare ocrCreditsRemaining: number;
